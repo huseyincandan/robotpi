@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>robotpi</title>
+
+<script src="/static/js/joystick.js?v=20260725-3"></script>
+<script src="/static/js/webrtc.js?v=20260725-3"></script>
+<script src="/static/js/app.js?v=20260819-1"></script>
+<link
+    rel="stylesheet"
+    href="/static/css/style.css?v=20260819-1">
+
+</head>
+<body>
+
+<div class="container">
+
+    <header class="topbar">
+        <h1>robotpi</h1>
+
+        <div class="topbar-info">
+            <div
+                class="battery-info"
+                id="batteryInfo">
+
+                Pil: -
+
+            </div>
+
+            <div
+                class="status"
+                id="status">
+
+                Hazır
+
+            </div>
+        </div>
+    </header>
+
+    <div class="camera">
+        <video
+            id="remoteVideo"
+            autoplay
+            playsinline
+            muted>
+        </video>
+    </div>
+
+    <audio
+        id="remoteAudio"
+        autoplay
+        playsinline>
+    </audio>
+
+    <div class="volume-control remote-audio-control">
+        <label for="remoteAudioVolume">
+            Gelen Ses
+        </label>
+
+        <input
+            id="remoteAudioVolume"
+            type="range"
+            min="0"
+            max="100"
+            value="100"
+            step="1"
+            aria-label="Browser gelen ses seviyesi">
+
+        <span id="remoteAudioVolumeValue">
+            100%
+        </span>
+    </div>
+
+    <div class="volume-control speaker-control">
+        <label for="speakerVolume">
+            Hoparlor
+        </label>
+
+        <input
+            id="speakerVolume"
+            type="range"
+            min="0"
+            max="100"
+            value="85"
+            step="1"
+            aria-label="Robot hoparlor ses seviyesi">
+
+        <span id="speakerVolumeValue">
+            85%
+        </span>
+    </div>
+
+    <section class="controls">
+        <button
+            id="connectButton"
+            type="button">
+            Kamerayı Başlat
+        </button>
+
+        <button
+            id="wanderButton"
+            type="button">
+            Gezinmeyi Başlat
+        </button>
+
+        <button
+            id="nav2Button"
+            type="button">
+            Nav2 Baslat
+        </button>
+
+        <button
+            id="exploreButton"
+            type="button">
+            Kesfi Baslat
+        </button>
+
+        <button
+            id="lidarCalibrateButton"
+            type="button">
+            Lidar Kalibrasyon
+        </button>
+
+        <button
+            id="imuCalibrateButton"
+            type="button">
+            Jiroskop Kalibrasyon
+        </button>
+
+        <button
+            id="mapButton"
+            type="button">
+            Harita
+        </button>
+
+        <div id="joystick">
+            <div id="stick"></div>
+        </div>
+    </section>
+
+    <section
+        id="mapSection"
+        class="map-section hidden"
+        aria-live="polite">
+
+        <div class="map-toolbar">
+            <h2>Harita</h2>
+
+            <div class="map-toolbar-actions">
+                <button
+                    id="mapResetButton"
+                    type="button"
+                    class="map-refresh-button">
+                    Sifirla
+                </button>
+
+                <button
+                    id="mapRefreshButton"
+                    type="button"
+                    class="map-refresh-button">
+                    Yenile
+                </button>
+            </div>
+        </div>
+
+        <p id="mapStatus" class="map-status">
+            Harita yukleniyor...
+        </p>
+
+        <p id="mapMeta" class="map-meta">
+            Son guncelleme: -
+        </p>
+
+        <div class="map-frame">
+            <div class="map-stage">
+                <img
+                    id="mapImage"
+                    alt="Robot tarafindan olusturulan harita"
+                    loading="lazy">
+
+                <canvas
+                    id="mapOverlay"
+                    aria-hidden="true">
+                </canvas>
+            </div>
+        </div>
+    </section>
+
+</div>
+
+</body>
+</html>

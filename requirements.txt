@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+jinja2
+aiortc
+av
+opencv-python
+numpy
+gpiozero
+lgpio
+pyserial
+openwakeword
+faster-whisper
+openai
+python-dotenv
+yt-dlp
+smbus2
+rplidar-roboticia

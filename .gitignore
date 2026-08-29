@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Environment / secrets
+.env
+
+# Logs and runtime output
+logs/
+output/incidents/
+output/lidar/
+output/maps/
+
+# Large model/binary assets
+models/
+data/
+
+# Misc
+.lgd-nfy0
+*.log
