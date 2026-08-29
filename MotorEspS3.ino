@@ -70,11 +70,16 @@ void motorInit(const Motor &m) {
 
 // speed: -255 (full reverse) .. 255 (full forward)
 const int MIN_EFFECTIVE_SPEED = 60; // bu esigin altindaki komutlar surtunmeyi yenip motoru fiilen cevirmeyebilir
+// Yerinde donuste (vx=0) 4 tekerlek de birden yanal kaymali surtunmeyi yenmek
+// zorunda - bu, duz gitmekten cok daha fazla tork ister. MIN_EFFECTIVE_SPEED
+// bunun icin yetersiz kaliyordu: nav2 dis=0 omega!=0 komutu gonderiyor, gyro
+// donusun gerceklesmedigini gosteriyor, robot hicbir yere hareket etmiyordu.
+const int MIN_EFFECTIVE_PIVOT_SPEED = 130;
 
-void motorWrite(const Motor &m, int speed) {
+void motorWrite(const Motor &m, int speed, int minEffective = MIN_EFFECTIVE_SPEED) {
   speed = constrain(speed, -255, 255);
-  if (speed != 0 && abs(speed) < MIN_EFFECTIVE_SPEED) {
-    speed = (speed > 0) ? MIN_EFFECTIVE_SPEED : -MIN_EFFECTIVE_SPEED; // zayif komutlari calisir esige yukselt
+  if (speed != 0 && abs(speed) < minEffective) {
+    speed = (speed > 0) ? minEffective : -minEffective; // zayif komutlari calisir esige yukselt
   }
   if (m.reversed) speed = -speed;
   digitalWrite(m.in1, speed > 0);
@@ -88,10 +93,11 @@ void skidSteerDrive(int vx, int omega) {
   int scaledOmega = (omega * (255 - abs(vx))) / 255;
   int left = vx - scaledOmega;
   int right = vx + scaledOmega;
-  motorWrite(motorFL, left);
-  motorWrite(motorRL, left);
-  motorWrite(motorFR, right);
-  motorWrite(motorRR, right);
+  int minEffective = (vx == 0 && omega != 0) ? MIN_EFFECTIVE_PIVOT_SPEED : MIN_EFFECTIVE_SPEED;
+  motorWrite(motorFL, left, minEffective);
+  motorWrite(motorRL, left, minEffective);
+  motorWrite(motorFR, right, minEffective);
+  motorWrite(motorRR, right, minEffective);
 }
 
 void stopAll() {

@@ -36,9 +36,14 @@ controller_server:
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: false
-      # Keep zero linear velocity in the sample set so DWB can turn in place
-      # when every forward arc is blocked.
-      min_vel_x: 0.0
+      # Was 0.0 to allow pure in-place pivots, but on this 4WD skid-steer
+      # chassis a vx=0 turn needs way more torque to beat scrub friction on
+      # all 4 wheels than the firmware's MIN_EFFECTIVE_SPEED provides - the
+      # commanded omega just spun the wheels without turning the robot
+      # (confirmed live: gyro stayed ~0 while a nonzero turn was continuously
+      # sent). Forcing a small forward creep makes every turn a rolling arc
+      # instead of a dead pivot, which the chassis can actually execute.
+      min_vel_x: 0.04
       max_vel_x: 0.24
       # Lowered from 1.0/1.2 - calmer normal-wander turning; door-threshold
       # push-through recovery lives in services/motor.py, unaffected by this.
