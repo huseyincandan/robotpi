@@ -115,12 +115,22 @@ def register_control_routes(
 
         return None
 
-    def _ultrasonic_forward_block_reason():
+    def _ultrasonic_forward_block_reason(stop_distance_cm=None):
 
         # The lidar has a hardware blind zone below LIDAR.MIN_VALID_CM, so it
         # cannot see an obstacle directly against the bumper. Ultrasonic is the
         # only sensor covering that range, so this check must run for every
         # drive source (including nav2/explore_lite) and can never be bypassed.
+        # Ultrasonic readings are also published as a LaserScan into Nav2's
+        # costmap (config/nav2_params.yaml ultrasonic_layer), so autonomous
+        # sources already plan around what this sensor sees; callers may pass
+        # a tighter stop_distance_cm to use this only as a last-resort check.
+        threshold_cm = (
+            float(stop_distance_cm)
+            if stop_distance_cm is not None
+            else float(ULTRASONIC.get("STOP_DISTANCE_CM", 20))
+        )
+
         if hasattr(motor, "read_distance_centimeters"):
             try:
                 centimeters = motor.read_distance_centimeters()
@@ -132,7 +142,7 @@ def register_control_routes(
                         "distance": None
                     }
 
-                if centimeters <= float(ULTRASONIC.get("STOP_DISTANCE_CM", 35)):
+                if centimeters <= threshold_cm:
                     print(
                         "FORWARD BLOCK: ultrasonic",
                         round(float(centimeters), 1),
@@ -314,10 +324,13 @@ def register_control_routes(
                         "distance": block["distance"]
                     }
             else:
-                # Nav2's own costmap avoidance covers the lidar's range, but not
-                # its close-range blind zone (see LIDAR.MIN_VALID_CM) - so the
-                # ultrasonic hard stop must still apply to nav2-sourced drives.
-                ultrasonic_block = _ultrasonic_forward_block_reason()
+                # Ultrasonic is fused into Nav2's costmap (see nav2_params.yaml
+                # ultrasonic_layer), so the planner/controller already steer
+                # around what it sees; this is now just a tight last-resort
+                # failsafe for the blind gap below the lidar's minimum range.
+                ultrasonic_block = _ultrasonic_forward_block_reason(
+                    stop_distance_cm=float(ULTRASONIC.get("AUTONOMOUS_STOP_DISTANCE_CM", 12))
+                )
 
                 if ultrasonic_block:
                     motor.note_forward_block()

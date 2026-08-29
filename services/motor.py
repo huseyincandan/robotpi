@@ -1320,6 +1320,36 @@ class MotorService:
 
         return True
 
+    def _detect_stall_reason(self, driving_forward, stuck_event):
+
+        # Single priority-ordered check: IMU stuck event > lidar motion
+        # stall > forward-block timeout. Only IMU/lidar checks require the
+        # robot to actually be driving forward; forward-block timeout can
+        # also fire while turning in place against a blocked path.
+        if driving_forward:
+            if stuck_event:
+                return "imu"
+
+            if self.is_lidar_motion_stalled():
+                print(
+                    "LIDAR STALL: no confirmed motion at max boost, starting recovery",
+                    flush=True
+                )
+                self._lidar_verify_stall_count = 0
+                self.last_block_reason = "lidar_stall"
+                return "lidar_stall"
+
+        if self.is_forward_block_stalled():
+            print(
+                "FORWARD BLOCK STALL: blocked too long, starting recovery",
+                flush=True
+            )
+            self.clear_forward_block()
+            self.last_block_reason = "forward_block_stall"
+            return "forward_block_stall"
+
+        return None
+
     async def safety_loop(self):
 
         while True:
@@ -1341,9 +1371,13 @@ class MotorService:
                 self.blocked = True
                 self.last_block_reason = "sensor_fault"
                 print("IMU BUS SAFETY TRIP:", self.last_sensor_fault, flush=True)
+                await asyncio.sleep(ULTRASONIC["SAFETY_CHECK_INTERVAL_SECONDS"])
                 continue
 
-            if self.current_y > 0:
+            driving_forward = self.current_y > 0
+            stuck_event = None
+
+            if driving_forward:
                 self.drive(
                     self.last_requested_x,
                     self.last_requested_y
@@ -1355,33 +1389,8 @@ class MotorService:
 
                 if stuck_event:
                     self.stop_for_imu_stuck()
-                    await self.recover_from_stuck()
-                elif self.is_lidar_motion_stalled():
-                    print(
-                        "LIDAR STALL: no confirmed motion at max boost, starting recovery",
-                        flush=True
-                    )
-                    self._lidar_verify_stall_count = 0
-                    self.last_block_reason = "lidar_stall"
-                    await self.recover_from_stuck()
-                elif self.is_forward_block_stalled():
-                    print(
-                        "FORWARD BLOCK STALL: blocked too long, starting recovery",
-                        flush=True
-                    )
-                    self.clear_forward_block()
-                    self.last_block_reason = "forward_block_stall"
-                    await self.recover_from_stuck()
-            elif self.is_forward_block_stalled():
-                # Ultrasonic keeps rejecting the forward component, so the
-                # only commands actually reaching current_y=0 are turn-only -
-                # this check must run here too, not just the y>0 branch above.
-                print(
-                    "FORWARD BLOCK STALL: blocked too long, starting recovery",
-                    flush=True
-                )
-                self.clear_forward_block()
-                self.last_block_reason = "forward_block_stall"
+
+            if self._detect_stall_reason(driving_forward, stuck_event):
                 await self.recover_from_stuck()
 
             await asyncio.sleep(

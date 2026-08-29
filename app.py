@@ -97,10 +97,6 @@ from services.music import (
     MusicService
 )
 
-from services.lidar import (
-    LidarService
-)
-
 from services.movement import (
     MovementService
 )
@@ -124,6 +120,16 @@ from services.speech import (
 from services.wake import (
     run_wake_loop
 )
+
+
+def _try_init_service(factory, label):
+    try:
+        service = factory()
+        print(f"{label} SERVICE READY", flush=True)
+        return service
+    except Exception as exc:
+        print(f"{label} SERVICE DISABLED:", repr(exc), flush=True)
+        return None
 
 
 class NullMotorService:
@@ -162,36 +168,11 @@ app.mount(
     name="static"
 )
 
-try:
-    distance = DistanceService()
-except Exception as exc:
-    distance = None
-    print(
-        "DISTANCE SERVICE DISABLED:",
-        repr(exc),
-        flush=True
-    )
-
-try:
-    imu = Mpu6050Service()
-except Exception as exc:
-    imu = None
-    print(
-        "IMU SERVICE DISABLED:",
-        repr(exc),
-        flush=True
-    )
+distance = _try_init_service(DistanceService, "DISTANCE")
+imu = _try_init_service(Mpu6050Service, "IMU")
 
 if bool(POWER_MONITOR.get("ENABLED", True)):
-    try:
-        power_monitor = Ina219Service()
-    except Exception as exc:
-        power_monitor = None
-        print(
-            "POWER MONITOR SERVICE DISABLED:",
-            repr(exc),
-            flush=True
-        )
+    power_monitor = _try_init_service(Ina219Service, "POWER MONITOR")
 else:
     power_monitor = None
     print("POWER MONITOR DISABLED BY CONFIG", flush=True)

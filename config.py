@@ -22,6 +22,12 @@ ULTRASONIC = {
     "LOG_INTERVAL_SECONDS": 1,
     "SLOW_DISTANCE_CM": 90,
     "STOP_DISTANCE_CM": 20,
+    # Ultrasonic is also published as a LaserScan (/ultrasonic_scan) into Nav2's
+    # costmap (see config/nav2_params.yaml ultrasonic_layer), so autonomous
+    # driving already plans/steers around what the ultrasonic sees. This is
+    # only a last-resort failsafe for the true blind gap below the lidar's
+    # minimum range, so it can be tighter than the manual/joystick threshold.
+    "AUTONOMOUS_STOP_DISTANCE_CM": 12,
     "MIN_FORWARD_SPEED_PERCENT": 12,
     "SAFETY_CHECK_INTERVAL_SECONDS": 0.05,
     "FILTER_WINDOW_SIZE": 7,
