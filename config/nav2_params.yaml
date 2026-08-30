@@ -383,9 +383,18 @@ lifecycle_manager_navigation:
   ros__parameters:
     use_sim_time: false
     autostart: true
+    # NOT actually used at runtime: nav2_bringup's navigation_launch.py hardcodes
+    # its own lifecycle_nodes list and passes it directly to this node's
+    # 'node_names' parameter, without loading this yaml file for that node at all.
+    # Kept here in sync with that list purely for documentation accuracy.
     node_names:
       - controller_server
+      - smoother_server
       - planner_server
+      - route_server
       - behavior_server
+      - velocity_smoother
+      - collision_monitor
       - bt_navigator
       - waypoint_follower
+      - docking_server
