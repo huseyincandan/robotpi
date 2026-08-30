@@ -341,7 +341,7 @@ def register_control_routes(
                         # freezing the whole command. Preserve the bridge's
                         # slew-limited value; amplifying it here would recreate
                         # the turn impulse that corrupts lidar scan matching.
-                        motor.drive(x, 0, use_forward_safety=False)
+                        motor.drive(x, 0, use_forward_safety=False, source=source_value)
                     else:
                         motor.stop()
                         # Tell the cmd_vel bridge's slip-correction no real motion
@@ -360,7 +360,10 @@ def register_control_routes(
             # clear, so any earlier stall timer no longer reflects reality.
             motor.clear_forward_block()
 
-        if y < 0 and bypass_forward_safety:
+        if y < 0:
+            # Was gated on bypass_forward_safety (nav2/explore/ros2 only), which
+            # meant manual/joystick reverse never got a lidar rear check at all -
+            # any source can back into something, so always check.
             rear_clear, rear_cm = motor.rear_motion_clear()
             if not rear_clear:
                 motor.stop()
@@ -373,7 +376,8 @@ def register_control_routes(
         moved = motor.drive(
             x,
             y,
-            use_forward_safety=not bypass_forward_safety
+            use_forward_safety=not bypass_forward_safety,
+            source=source_value
         )
 
         if not moved:

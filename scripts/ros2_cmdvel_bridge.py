@@ -13,7 +13,7 @@ from geometry_msgs.msg import TransformStamped
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import Range
 from std_srvs.srv import Trigger
 from tf2_ros import TransformBroadcaster
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
@@ -95,7 +95,7 @@ class CmdVelBridge(Node):
             10
         )
         self.ultrasonic_pub = self.create_publisher(
-            LaserScan,
+            Range,
             args.ultrasonic_topic,
             10
         )
@@ -213,19 +213,19 @@ class CmdVelBridge(Node):
             float(distance_cm) / 100.0
             + self.ultrasonic_x_offset
         )
-        scan = LaserScan()
-        scan.header.stamp = self.get_clock().now().to_msg()
-        scan.header.frame_id = self.base_frame
-        scan.angle_min = math.radians(-12.0)
-        scan.angle_max = math.radians(12.0)
-        scan.angle_increment = math.radians(6.0)
-        scan.time_increment = 0.0
-        scan.scan_time = 1.0 / self.ultrasonic_rate_hz
-        scan.range_min = 0.02
-        scan.range_max = 4.2
-        beam_range = measured_range if measured_range <= scan.range_max else float("inf")
-        scan.ranges = [beam_range] * 5
-        self.ultrasonic_pub.publish(scan)
+        msg = Range()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.base_frame
+        msg.radiation_type = Range.ULTRASOUND
+        msg.field_of_view = math.radians(24.0)
+        msg.min_range = 0.02
+        msg.max_range = 4.2
+        # RangeSensorLayer's variable-range handler rejects range > max_range
+        # outright (no clearing), so clamp to max_range instead of inf - with
+        # clear_on_max_reading enabled in nav2_params.yaml, that clamped
+        # max-range reading is what triggers clearing of the free space ahead.
+        msg.range = min(measured_range, msg.max_range)
+        self.ultrasonic_pub.publish(msg)
 
     def _publish_laser_transform(self):
 
@@ -487,7 +487,7 @@ def parse_args():
     parser.add_argument("--lidar-odom-correction-enabled", type=lambda v: str(v).lower() not in ("0", "false", "no"), default=True)
     parser.add_argument("--lidar-odom-slip-scale", type=float, default=0.35)
     parser.add_argument("--motor-odom-source-enabled", type=lambda v: str(v).lower() not in ("0", "false", "no"), default=True)
-    parser.add_argument("--ultrasonic-topic", default="/ultrasonic_scan")
+    parser.add_argument("--ultrasonic-topic", default="/ultrasonic_range")
     parser.add_argument("--ultrasonic-rate-hz", type=float, default=10.0)
     parser.add_argument("--ultrasonic-x-offset", type=float, default=0.115)
     return parser.parse_args()

@@ -60,29 +60,35 @@ class Mpu6050Service:
 
     def read_motion(self):
 
-        # Motor calisirken PWM gurultusu ile ara sira tek seferlik I2C hatasi (Remote I/O
-        # error) olusabiliyor; bir kez daha denemek gecici hatayi cogunlukla atlatir.
-        try:
-            with self.lock:
-                accel_x = self._read_word(ACCEL_XOUT_H) / ACCEL_SCALE
-                accel_y = self._read_word(ACCEL_XOUT_H + 2) / ACCEL_SCALE
-                accel_z = self._read_word(ACCEL_XOUT_H + 4) / ACCEL_SCALE
+        # Motor calisirken PWM gurultusu ile ara sira I2C hatasi (Remote I/O error)
+        # olusabiliyor; birkac kez daha denemek genelde gecici hatayi atlatir. Sayaca
+        # (recent_read_retry_count -> BUS_RETRY_FAULT_COUNT tetigi) sadece TUM denemeler
+        # tukenip kendiliginden duzelmeyen gercek/kalici bir hata eklenir - boylece
+        # kendiliginden duzelen tekil glitch'ler guvenlik durdurmasini gereksiz tetiklemez.
+        max_attempts = max(1, int(IMU.get("I2C_READ_MAX_ATTEMPTS", 3)))
+        last_exc = None
 
-                gyro_x = self._read_word(ACCEL_XOUT_H + 8) / GYRO_SCALE
-                gyro_y = self._read_word(ACCEL_XOUT_H + 10) / GYRO_SCALE
-                gyro_z = self._read_word(ACCEL_XOUT_H + 12) / GYRO_SCALE
-        except OSError as exc:
-            self.last_read_error = repr(exc)
+        for attempt in range(max_attempts):
+            try:
+                with self.lock:
+                    accel_x = self._read_word(ACCEL_XOUT_H) / ACCEL_SCALE
+                    accel_y = self._read_word(ACCEL_XOUT_H + 2) / ACCEL_SCALE
+                    accel_z = self._read_word(ACCEL_XOUT_H + 4) / ACCEL_SCALE
+
+                    gyro_x = self._read_word(ACCEL_XOUT_H + 8) / GYRO_SCALE
+                    gyro_y = self._read_word(ACCEL_XOUT_H + 10) / GYRO_SCALE
+                    gyro_z = self._read_word(ACCEL_XOUT_H + 12) / GYRO_SCALE
+                last_exc = None
+                break
+            except OSError as exc:
+                last_exc = exc
+                self.last_read_error = repr(exc)
+                if attempt < max_attempts - 1:
+                    time.sleep(0.005)
+
+        if last_exc is not None:
             self._read_retry_times.append(time.monotonic())
-            time.sleep(0.005)
-            with self.lock:
-                accel_x = self._read_word(ACCEL_XOUT_H) / ACCEL_SCALE
-                accel_y = self._read_word(ACCEL_XOUT_H + 2) / ACCEL_SCALE
-                accel_z = self._read_word(ACCEL_XOUT_H + 4) / ACCEL_SCALE
-
-                gyro_x = self._read_word(ACCEL_XOUT_H + 8) / GYRO_SCALE
-                gyro_y = self._read_word(ACCEL_XOUT_H + 10) / GYRO_SCALE
-                gyro_z = self._read_word(ACCEL_XOUT_H + 12) / GYRO_SCALE
+            raise last_exc
 
         sample = {
             "time": time.monotonic(),

@@ -8,6 +8,14 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_link
     odom_topic: /odom
+    # Stock BT's RoundRobin recovery order is Spin -> Wait -> BackUp, and its
+    # ReactiveFallback checks GoalUpdated first each tick, which skips
+    # RecoveryActions entirely whenever explore_lite has already sent a new
+    # goal (confirmed live: recovery never ran at all, 0 spin/backup log lines
+    # despite repeated stalls). This custom tree removes that GoalUpdated
+    # preemption and reorders RecoveryActions to BackUp -> Spin -> Wait -
+    # see the file for detail.
+    default_nav_to_pose_bt_xml: /home/robotpi/projects/robotpi/config/nav2_bt_recovery_backup_first.xml
 
 controller_server:
   ros__parameters:
@@ -139,7 +147,7 @@ local_costmap:
       transform_tolerance: 0.5
       # Robot body is ~0.23m front-back x 0.14m wide, centered on base_link.
       footprint: "[[0.115, 0.07], [0.115, -0.07], [-0.115, -0.07], [-0.115, 0.07]]"
-      plugins: ["obstacle_layer", "ultrasonic_layer", "inflation_layer"]
+      plugins: ["obstacle_layer", "range_layer", "virtual_obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -152,17 +160,35 @@ local_costmap:
           data_type: "LaserScan"
           raytrace_max_range: 6.0
           obstacle_max_range: 4.5
-      ultrasonic_layer:
+      # Nav2's own plugin for single-beam IR/sonar sensors (ingests
+      # sensor_msgs/Range directly), replacing the previous ultrasonic_layer
+      # hack that faked a 5-beam LaserScan through ObstacleLayer.
+      range_layer:
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: true
+        topics: ["/ultrasonic_range"]
+        phi: 1.2
+        inflate_cone: 1.0
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
+        clear_on_max_reading: true
+        input_sensor_type: "ALL"
+      # IMU-flagged obstacles too low for the lidar/ultrasonic to ever see
+      # (see services/motor.py invisible-obstacle detection + config's
+      # ROS2_VIRTUAL_OBSTACLES_*). Mark-only, no clearing/raytracing, so a
+      # normal costmap clear (e.g. Nav2's own recovery) can't erase these.
+      virtual_obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: ultrasonic
-        ultrasonic:
-          topic: /ultrasonic_scan
-          clearing: true
+        observation_sources: virtual_obstacles
+        virtual_obstacles:
+          topic: /virtual_obstacles
+          clearing: false
           marking: true
-          data_type: "LaserScan"
-          raytrace_max_range: 4.2
-          obstacle_max_range: 4.0
+          data_type: "PointCloud2"
+          max_obstacle_height: 2.0
+          obstacle_max_range: 4.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
@@ -185,7 +211,7 @@ global_costmap:
       transform_tolerance: 0.5
       # Same footprint as local_costmap.
       footprint: "[[0.115, 0.07], [0.115, -0.07], [-0.115, -0.07], [-0.115, 0.07]]"
-      plugins: ["static_layer", "obstacle_layer", "ultrasonic_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "range_layer", "virtual_obstacle_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true
@@ -201,17 +227,28 @@ global_costmap:
           data_type: "LaserScan"
           raytrace_max_range: 6.0
           obstacle_max_range: 4.5
-      ultrasonic_layer:
+      range_layer:
+        plugin: "nav2_costmap_2d::RangeSensorLayer"
+        enabled: true
+        topics: ["/ultrasonic_range"]
+        phi: 1.2
+        inflate_cone: 1.0
+        no_readings_timeout: 0.0
+        clear_threshold: 0.2
+        mark_threshold: 0.8
+        clear_on_max_reading: true
+        input_sensor_type: "ALL"
+      virtual_obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: ultrasonic
-        ultrasonic:
-          topic: /ultrasonic_scan
-          clearing: true
+        observation_sources: virtual_obstacles
+        virtual_obstacles:
+          topic: /virtual_obstacles
+          clearing: false
           marking: true
-          data_type: "LaserScan"
-          raytrace_max_range: 4.2
-          obstacle_max_range: 4.0
+          data_type: "PointCloud2"
+          max_obstacle_height: 2.0
+          obstacle_max_range: 4.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
@@ -255,15 +292,50 @@ collision_monitor:
     base_shift_correction: true
     stop_pub_timeout: 2.0
     polygons: ["FootprintApproach"]
+    # Nav2's Approach model does a static pre-check: if the (unsimulated,
+    # t=0) zone already contains >= min_points, getCollisionTime() returns 0.0
+    # regardless of commanded direction, which zeroes velocity even for a
+    # pure backup away from the obstacle (confirmed by reading
+    # nav2_collision_monitor's polygon.cpp: the direction-blind check runs
+    # before the per-step simulation). VelocityPolygon is nav2's own native
+    # fix for this: it swaps the active zone shape based on commanded
+    # cmd_vel, so we can shrink the zone to the robot's rear half while
+    # reversing (excludes a front-flush obstacle from the check) while
+    # keeping the full footprint zone for forward/rotate-in-place motion.
+    # Robot footprint is the same 0.23m x 0.14m rectangle used by the
+    # costmaps above (see local_costmap.footprint note).
     FootprintApproach:
-      type: "polygon"
+      type: "velocity_polygon"
       action_type: "approach"
-      footprint_topic: "/local_costmap/published_footprint"
       time_before_collision: 1.2
       simulation_time_step: 0.1
       min_points: 6
       visualize: false
       enabled: true
+      holonomic: false
+      velocity_polygons: ["translation_forward", "translation_backward", "stopped"]
+      translation_forward:
+        points: "[[0.115, 0.07], [0.115, -0.07], [-0.115, -0.07], [-0.115, 0.07]]"
+        linear_min: 0.0
+        linear_max: 1.0
+        theta_min: -1.5
+        theta_max: 1.5
+      translation_backward:
+        # Front boundary pulled back to x=0.0 (excludes the front bumper
+        # area) so an obstacle the robot is already flush against doesn't
+        # block reversing away from it. Rear boundary kept at the real
+        # footprint extent so genuine rear obstacles still stop the backup.
+        points: "[[0.0, 0.07], [0.0, -0.07], [-0.115, -0.07], [-0.115, 0.07]]"
+        linear_min: -1.0
+        linear_max: 0.0
+        theta_min: -1.5
+        theta_max: 1.5
+      stopped:
+        points: "[[0.115, 0.07], [0.115, -0.07], [-0.115, -0.07], [-0.115, 0.07]]"
+        linear_min: -1.0
+        linear_max: 1.0
+        theta_min: -10.0
+        theta_max: 10.0
     observation_sources: ["scan"]
     scan:
       type: "scan"

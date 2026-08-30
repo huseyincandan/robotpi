@@ -22,8 +22,9 @@ ULTRASONIC = {
     "LOG_INTERVAL_SECONDS": 1,
     "SLOW_DISTANCE_CM": 90,
     "STOP_DISTANCE_CM": 20,
-    # Ultrasonic is also published as a LaserScan (/ultrasonic_scan) into Nav2's
-    # costmap (see config/nav2_params.yaml ultrasonic_layer), so autonomous
+    # Ultrasonic is also published as sensor_msgs/Range (/ultrasonic_range) into
+    # Nav2's costmap (see config/nav2_params.yaml range_layer, RangeSensorLayer),
+    # so autonomous
     # driving already plans/steers around what the ultrasonic sees. This is
     # only a last-resort failsafe for the true blind gap below the lidar's
     # minimum range, so it can be tighter than the manual/joystick threshold.
@@ -69,6 +70,14 @@ MOTOR = {
     "RECOVERY_THRESHOLD_MIN_LIDAR_FRONT_CM": 45.0,
     "RECOVERY_THRESHOLD_SENSOR_GAP_CM": 10.0,
     "RECOVERY_THRESHOLD_MIN_ULTRASONIC_CM": 50.0,
+    # An IMU stuck event with both the lidar front sector AND the ultrasonic
+    # reading this clear means neither sensor can see whatever is holding the
+    # robot back (e.g. a low table leg below both beams). Nav2's costmap has
+    # no idea it's there either, so its own BT recovery can't route around it
+    # - our own recovery must run regardless of drive source, and the spot
+    # gets marked as a virtual obstacle (see ROS2_VIRTUAL_OBSTACLES_* above).
+    "INVISIBLE_OBSTACLE_MIN_LIDAR_FRONT_CM": 45.0,
+    "INVISIBLE_OBSTACLE_MIN_ULTRASONIC_CM": 30.0,
     "RECOVERY_LATCH_CLEAR_ULTRASONIC_CM": 50.0,
     "RECOVERY_LATCH_CLEAR_CONSECUTIVE_SAMPLES": 5,
     # Ultrasonik engelde ileri bileseni kesilirken Nav2'nin kacis donusunu
@@ -132,6 +141,10 @@ IMU = {
     "IMPACT_ACCEL_DELTA_G": 0.45,
     "UNEXPECTED_GYRO_DPS": 260,
     "STUCK_COOLDOWN_SECONDS": 1.5,
+    # Motor PWM gurultusuyle olusan tekil I2C glitch'leri read_motion() bu kadar
+    # deneme icinde kendiliginden atlatirsa BUS_RETRY_FAULT_COUNT'a eklenmez -
+    # sadece TUM denemeler tukenirse gercek/kalici hata sayilir.
+    "I2C_READ_MAX_ATTEMPTS": 3,
     "BUS_RETRY_FAULT_COUNT": 2,
     "BUS_RETRY_FAULT_WINDOW_SECONDS": 3.0,
     # 2026-08-21: elle test edilip esikte basarili oldugu dogrulanan tarif -
@@ -144,7 +157,14 @@ IMU = {
     "RECOVERY_BACKUP_SECONDS": 1.2,
     "RECOVERY_BACKUP_MAX_TRIES": 3,
     "RECOVERY_BACKUP_MAX_SECONDS": 1.6,
-    "RECOVERY_BACKUP_MIN_LIDAR_REAR_CM": 45.0,
+    # Was 45.0, lowered to 20.0 earlier - but 2026-08-30 that let an escalating
+    # multi-try backup (up to 80%/1.6s x3, no nav2-style collision-checking of
+    # its own) run for ~2m into a low window sill the lidar's current mount
+    # height doesn't see (a real blind spot, not a false alarm) - robot hit the
+    # window and wedged itself. Raised back to 40.0 as a safety margin until
+    # the lidar mount is physically redesigned/lowered and the rear blind spot
+    # is verified fixed. DO NOT re-lower without re-verifying rear FOV first.
+    "RECOVERY_BACKUP_MIN_LIDAR_REAR_CM": 40.0,
     # 46% (nav2'nin de kullandigi tavan) yerinde donus icin yetersiz kaliyordu -
     # jiroskop testinde gercek donus olculememisti. Kurtarma kendi tavanini
     # kullandigi icin bagimsiz olarak yukseltiyoruz.
@@ -208,6 +228,29 @@ MAP = {
     "ROS2_EXPORT_SCAN_FILE": "live_scan.json",
     "ROS2_EXPORT_SCAN_RATE_HZ": 4.0,
     "ROS2_SCAN_STALE_SECONDS": 15.0,
+    # Low obstacles (table/couch legs) sit below the lidar's scan plane and
+    # the ultrasonic's beam, so neither can ever route around them. When
+    # services/motor.py's IMU stuck-detector fires with no corroborating
+    # lidar/ultrasonic reading, it appends the robot's current map-frame pose
+    # here; this file is republished as a PointCloud2 (see
+    # scripts/ros2_virtual_obstacles.py) into Nav2's costmaps as a
+    # mark-only, non-clearing source, so the planner keeps avoiding that
+    # exact spot even across normal costmap clears.
+    "ROS2_VIRTUAL_OBSTACLES_FILE": "virtual_obstacles.json",
+    "ROS2_VIRTUAL_OBSTACLES_TOPIC": "/virtual_obstacles",
+    "ROS2_VIRTUAL_OBSTACLES_RATE_HZ": 2.0,
+    "ROS2_VIRTUAL_OBSTACLES_RING_RADIUS_M": 0.06,
+    "ROS2_VIRTUAL_OBSTACLES_RING_POINTS": 10,
+    # New marks within this radius of an existing one are treated as the same
+    # obstacle (refreshes its timestamp instead of growing the file forever).
+    "ROS2_VIRTUAL_OBSTACLES_DEDUPE_RADIUS_M": 0.20,
+    "ROS2_VIRTUAL_OBSTACLES_MAX_ENTRIES": 200,
+    # A single IMU stuck event can be a false positive (e.g. a momentary
+    # sensor-reading gap during a real, visible wedge). Require the SAME spot
+    # to be hit this many times before it's actually published into Nav2's
+    # costmap, so one borderline detection can't permanently wall off a path
+    # (marks are non-clearing/permanent, so a false positive here is costly).
+    "ROS2_VIRTUAL_OBSTACLES_MIN_HIT_COUNT": 2,
     "ROS2_MOVEMENT_SCAN_MAX_AGE_SECONDS": 2.5,
     "ROS2_AUTOSTART_STACK": True,
     "ROS2_LIDAR_PORT": "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_da358bbe261ef111960cc3e40f0f12f8-if00-port0",
@@ -217,7 +260,25 @@ MAP = {
     "ROS2_LIDAR_X_OFFSET_M": -0.085,
     "ROS2_LIDAR_DRIVER": "python_bridge",
     "ROS2_LIDAR_REVERSE_ANGLE": True,
-    "ROS2_LIDAR_ANGLE_OFFSET_DEG": 180.0,
+    # 2026-08-30: lidar fiziksel olarak yeniden yerlestirildi (~90 derece donuk).
+    # /lidar/calibrate ile olculdu: eski 180.0 offset'te gercek on, yayinlanan
+    # /scan aci=234 derecede cikiyordu (0 derece = base_link ileri varsayimiyla
+    # hizasiz, TF donusu sifir oldugu icin). Ilk duzeltme 306.0 uygulandi, ama
+    # sonraki tek-seferlik olcum gurultuluydu (muhtemelen restart sonrasi
+    # ultrasonik henuz stabil degilken alinan kirli veri) - 358.68 degerine
+    # atlandi. Iki TEMIZ/bagimsiz restart sonrasi olcum (66.0 ve 67.79, ayni
+    # bridge tabaninda) birbiriyle tutarli cikti - bu ikisinin ortalamasi
+    # (66.9) guvenilir kabul edildi. Ara deger: 358.68 - 66.9 = 291.78.
+    # Bu degerle harita/pose testinde (live_map.pgm'deki duvar/koltuk
+    # noktalarinin PCA ile olculen dogrultusu vs yaw_rad) kalinti ~22-26 derece
+    # sapma bulundu (3 bagimsiz olcum: koltuk 22.4/23.2, kapiya tam paralel/
+    # tekerlek temasli 25.8 derece - hepsi ayni yonde ve tutarli). Ilk denemede
+    # +24 eklendi (315.78) ama sapma 25.8 -> 49.6 dereceye CIKTI (yon ters
+    # cikti, +24 dogruluyor: 25.8+24=49.8). Dogru yon cikarma: 291.78 - 25.8 =
+    # 265.98. DOGRULANDI: bu degerle kapiya tam paralel (iki tekerlek de
+    # temasli) referansta yakin mesafe olcumu 0.1 derece sapma verdi (mukemmel
+    # eslesme). 2026-08-30 itibariyla nihai/guvenilir deger.
+    "ROS2_LIDAR_ANGLE_OFFSET_DEG": 265.98,
     "ROS2_SLAM_LAUNCH": "online_async_launch.py",
     "ROS2_SLAM_PARAMS_FILE": "config/slam_toolbox_online_async.yaml",
     "ROS2_USE_SIM_TIME": False,

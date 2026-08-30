@@ -22,11 +22,13 @@ class Ros2SlamService:
         self._lidar_process = None
         self._slam_process = None
         self._scan_process = None
+        self._virtual_obstacles_process = None
         self._setup_bash = None
         self._lidar_cmd = None
         self._slam_cmd = None
         self._export_cmd = None
         self._scan_cmd = None
+        self._virtual_obstacles_cmd = None
 
         self._cleanup_stale_processes()
 
@@ -40,6 +42,7 @@ class Ros2SlamService:
         self.pose_file = output_dir / MAP.get("ROS2_EXPORT_POSE_FILE", "live_pose.json")
         self.meta_file = output_dir / MAP.get("ROS2_EXPORT_META_FILE", "live_map_meta.json")
         self.scan_file = output_dir / MAP.get("ROS2_EXPORT_SCAN_FILE", "live_scan.json")
+        self.virtual_obstacles_file = output_dir / MAP.get("ROS2_VIRTUAL_OBSTACLES_FILE", "virtual_obstacles.json")
 
         self._last_jump_check_pose = None
         self._last_imu_yaw_check = None
@@ -64,6 +67,7 @@ class Ros2SlamService:
 
         exporter_script = Path(__file__).resolve().parents[1] / "scripts" / "ros2_slam_exporter.py"
         scan_exporter_script = Path(__file__).resolve().parents[1] / "scripts" / "ros2_scan_exporter.py"
+        virtual_obstacles_script = Path(__file__).resolve().parents[1] / "scripts" / "ros2_virtual_obstacles.py"
 
         if not Path(setup_bash).exists():
             raise RuntimeError(f"ROS2 setup file not found: {setup_bash}")
@@ -73,6 +77,9 @@ class Ros2SlamService:
 
         if not scan_exporter_script.exists():
             raise RuntimeError(f"ROS2 scan exporter script not found: {scan_exporter_script}")
+
+        if not virtual_obstacles_script.exists():
+            raise RuntimeError(f"ROS2 virtual obstacles script not found: {virtual_obstacles_script}")
 
         preflight_cmd = (
             f"source {shlex.quote(setup_bash)} >/dev/null 2>&1 && "
@@ -193,6 +200,20 @@ class Ros2SlamService:
 
         self._scan_cmd = scan_cmd
 
+        virtual_obstacles_cmd = (
+            f"source {shlex.quote(setup_bash)} && "
+            f"python3 {shlex.quote(str(virtual_obstacles_script))} "
+            f"--input-file {shlex.quote(str(self.virtual_obstacles_file))} "
+            f"--topic {shlex.quote(str(MAP.get('ROS2_VIRTUAL_OBSTACLES_TOPIC', '/virtual_obstacles')))} "
+            f"--frame {shlex.quote(map_frame)} "
+            f"--rate {shlex.quote(str(float(MAP.get('ROS2_VIRTUAL_OBSTACLES_RATE_HZ', 2.0))))} "
+            f"--ring-radius-m {shlex.quote(str(float(MAP.get('ROS2_VIRTUAL_OBSTACLES_RING_RADIUS_M', 0.06))))} "
+            f"--ring-points {shlex.quote(str(int(MAP.get('ROS2_VIRTUAL_OBSTACLES_RING_POINTS', 10))))} "
+            f"--min-hit-count {shlex.quote(str(int(MAP.get('ROS2_VIRTUAL_OBSTACLES_MIN_HIT_COUNT', 2))))}"
+        )
+
+        self._virtual_obstacles_cmd = virtual_obstacles_cmd
+
         self._process = subprocess.Popen(
             ["bash", "-lc", self._with_ros_environment(shell_cmd)],
             cwd=str(Path.cwd()),
@@ -203,6 +224,14 @@ class Ros2SlamService:
 
         self._scan_process = subprocess.Popen(
             ["bash", "-lc", self._with_ros_environment(scan_cmd)],
+            cwd=str(Path.cwd()),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            preexec_fn=os.setsid
+        )
+
+        self._virtual_obstacles_process = subprocess.Popen(
+            ["bash", "-lc", self._with_ros_environment(virtual_obstacles_cmd)],
             cwd=str(Path.cwd()),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -253,6 +282,7 @@ class Ros2SlamService:
             "async_slam_toolbox_node",
             "ros2_slam_exporter.py",
             "ros2_scan_exporter.py",
+            "ros2_virtual_obstacles.py",
             "ros2_rplidar_bridge.py",
             "rplidar_composition"
         ]
@@ -297,6 +327,9 @@ class Ros2SlamService:
 
         if self._scan_process is not None and self._scan_process.poll() is not None:
             return f"scan_stopped({self._scan_process.poll()})"
+
+        if self._virtual_obstacles_process is not None and self._virtual_obstacles_process.poll() is not None:
+            return f"virtual_obstacles_stopped({self._virtual_obstacles_process.poll()})"
 
         if code is None:
             return "running"
@@ -453,7 +486,7 @@ class Ros2SlamService:
 
         clear_ok = completed.returncode == 0
 
-        for process in (self._process, self._scan_process, self._slam_process, self._lidar_process):
+        for process in (self._process, self._scan_process, self._slam_process, self._lidar_process, self._virtual_obstacles_process):
             if process is None:
                 continue
 
@@ -463,6 +496,7 @@ class Ros2SlamService:
         self._scan_process = None
         self._slam_process = None
         self._lidar_process = None
+        self._virtual_obstacles_process = None
 
         self._clear_map_outputs()
 
@@ -509,9 +543,12 @@ class Ros2SlamService:
         if self._scan_cmd:
             self._scan_process = self._spawn_command(self._scan_cmd)
 
+        if self._virtual_obstacles_cmd:
+            self._virtual_obstacles_process = self._spawn_command(self._virtual_obstacles_cmd)
+
     def _clear_map_outputs(self):
 
-        for path in (self.output_file, self.pose_file, self.meta_file, self.scan_file):
+        for path in (self.output_file, self.pose_file, self.meta_file, self.scan_file, self.virtual_obstacles_file):
             try:
                 if path.exists() and path.is_file():
                     path.unlink()
@@ -671,7 +708,7 @@ class Ros2SlamService:
 
     def close(self):
 
-        for process in (self._process, self._scan_process, self._slam_process, self._lidar_process):
+        for process in (self._process, self._scan_process, self._slam_process, self._lidar_process, self._virtual_obstacles_process):
             if process is None:
                 continue
 
@@ -680,5 +717,6 @@ class Ros2SlamService:
         self._slam_process = None
         self._lidar_process = None
         self._scan_process = None
+        self._virtual_obstacles_process = None
 
         self._process = None

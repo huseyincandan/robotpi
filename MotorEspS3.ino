@@ -76,6 +76,21 @@ const int MIN_EFFECTIVE_SPEED = 60; // bu esigin altindaki komutlar surtunmeyi y
 // donusun gerceklesmedigini gosteriyor, robot hicbir yere hareket etmiyordu.
 const int MIN_EFFECTIVE_PIVOT_SPEED = 130;
 
+// MIN_EFFECTIVE_PIVOT_SPEED butun 4 tekerlege esit uygulaniyor olsa da, gercek
+// zeminde tekerlek basina surtunme/agirlik dagilimi esit degil - 2026-08-30
+// gozlemi: donus baslarken bazen sadece en dusuk surtunmeli tek teker donup
+// patinaj yapiyor, digerleri 130'da hala statik surtunmeyi yenemiyor, net
+// donus olmuyor. Duzeltme: durgun halden yeni bir yerinde donus basladiginda
+// kisa bir sure (PIVOT_BREAKAWAY_MS) cok daha yuksek guc (PIVOT_BREAKAWAY_SPEED)
+// uygulanir - butun tekerlekler ayni anda statik surtunmeyi kirar - sonra
+// normal (daha dusuk) donus hizina geri donulur.
+const int PIVOT_BREAKAWAY_SPEED = 220;
+const unsigned long PIVOT_BREAKAWAY_MS = 150;
+int lastDriveVx = 0;
+int lastDriveOmega = 0;
+bool pivotBreakawayActive = false;
+unsigned long pivotBreakawayStartMs = 0;
+
 void motorWrite(const Motor &m, int speed, int minEffective = MIN_EFFECTIVE_SPEED) {
   speed = constrain(speed, -255, 255);
   if (speed != 0 && abs(speed) < minEffective) {
@@ -94,10 +109,29 @@ void skidSteerDrive(int vx, int omega) {
   int left = vx - scaledOmega;
   int right = vx + scaledOmega;
   int minEffective = (vx == 0 && omega != 0) ? MIN_EFFECTIVE_PIVOT_SPEED : MIN_EFFECTIVE_SPEED;
+
+  bool startingPivotFromStop = (
+    vx == 0 && omega != 0 && lastDriveVx == 0 && lastDriveOmega == 0
+  );
+  if (startingPivotFromStop) {
+    pivotBreakawayActive = true;
+    pivotBreakawayStartMs = millis();
+  }
+  if (pivotBreakawayActive) {
+    if (vx == 0 && omega != 0 && millis() - pivotBreakawayStartMs < PIVOT_BREAKAWAY_MS) {
+      minEffective = PIVOT_BREAKAWAY_SPEED;
+    } else {
+      pivotBreakawayActive = false;
+    }
+  }
+
   motorWrite(motorFL, left, minEffective);
   motorWrite(motorRL, left, minEffective);
   motorWrite(motorFR, right, minEffective);
   motorWrite(motorRR, right, minEffective);
+
+  lastDriveVx = vx;
+  lastDriveOmega = omega;
 }
 
 void stopAll() {

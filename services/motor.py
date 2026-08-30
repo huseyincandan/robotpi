@@ -1,13 +1,18 @@
 import asyncio
 import errno
 import glob
+import json
+import math
+import os
 import termios
 import threading
 import time
+from pathlib import Path
 
 import serial
 
 from config import IMU
+from config import MAP
 from config import MOTOR
 from config import MOTOR_SERIAL
 from config import ULTRASONIC
@@ -37,6 +42,12 @@ class MotorService:
         self.recovery_gave_up = False
         self.last_block_reason = None
         self.last_imu_event = None
+        self.last_drive_source = ""
+        self._map_dir = self._resolve_map_dir()
+        self._pose_file = self._map_dir / str(MAP.get("ROS2_EXPORT_POSE_FILE", "live_pose.json"))
+        self._virtual_obstacles_file = self._map_dir / str(
+            MAP.get("ROS2_VIRTUAL_OBSTACLES_FILE", "virtual_obstacles.json")
+        )
         self.current_x = 0
         self.current_y = 0
         self.last_obstacle_distance = None
@@ -374,6 +385,130 @@ class MotorService:
         )
         return front_cm >= minimum_clearance
 
+    def _resolve_map_dir(self):
+
+        map_dir = Path(str(MAP.get("DIR", "output/maps")))
+        if not map_dir.is_absolute():
+            map_dir = Path.cwd() / map_dir
+        return map_dir
+
+    def is_invisible_obstacle_stuck(self):
+
+        # Low obstacles (table/couch legs) sit below both the lidar's scan
+        # plane and the ultrasonic beam. If neither sensor reports anything
+        # close while the IMU says we're stuck, whatever is blocking us is
+        # invisible to Nav2's costmap too - it can't route around what it
+        # can't see, so this can't be left to Nav2's own BT recovery.
+        ultrasonic_cm = self.last_obstacle_distance
+        lidar_front_cm = self._lidar_front_distance_for_recovery()
+
+        ultrasonic_clear = (
+            ultrasonic_cm is None
+            or float(ultrasonic_cm) > float(MOTOR.get("INVISIBLE_OBSTACLE_MIN_ULTRASONIC_CM", 30.0))
+        )
+        lidar_clear = (
+            lidar_front_cm is None
+            or float(lidar_front_cm) > float(MOTOR.get("INVISIBLE_OBSTACLE_MIN_LIDAR_FRONT_CM", 45.0))
+        )
+        return ultrasonic_clear and lidar_clear
+
+    def _read_current_map_pose(self):
+
+        try:
+            with open(self._pose_file, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError):
+            return None
+
+        try:
+            return (
+                float(payload["x"]),
+                float(payload["y"]),
+                float(payload.get("yaw_rad", 0.0))
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _write_virtual_obstacles(self, entries):
+
+        try:
+            self._virtual_obstacles_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._virtual_obstacles_file.with_suffix(".json.tmp")
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                json.dump(entries, handle)
+            os.replace(tmp_path, self._virtual_obstacles_file)
+        except OSError:
+            pass
+
+    def mark_virtual_obstacle(self, reason):
+
+        pose = self._read_current_map_pose()
+        if pose is None:
+            return
+
+        x, y, yaw = pose
+        # The robot's own footprint center isn't quite where an invisible low
+        # obstacle caught it - it's a bit further along whichever way it was
+        # heading when it got stuck.
+        offset_m = 0.12
+        obstacle_x = x + offset_m * math.cos(yaw)
+        obstacle_y = y + offset_m * math.sin(yaw)
+
+        try:
+            with open(self._virtual_obstacles_file, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            entries = loaded if isinstance(loaded, list) else []
+        except (OSError, ValueError):
+            entries = []
+
+        dedupe_radius_m = float(MAP.get("ROS2_VIRTUAL_OBSTACLES_DEDUPE_RADIUS_M", 0.20))
+        now = time.time()
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            try:
+                existing_x = float(entry.get("x"))
+                existing_y = float(entry.get("y"))
+            except (TypeError, ValueError):
+                continue
+
+            if math.hypot(existing_x - obstacle_x, existing_y - obstacle_y) <= dedupe_radius_m:
+                entry["updated_at"] = now
+                entry["hit_count"] = int(entry.get("hit_count", 1)) + 1
+                self._write_virtual_obstacles(entries)
+                print(
+                    "VIRTUAL OBSTACLE REFRESHED:",
+                    f"x={obstacle_x:.2f}",
+                    f"y={obstacle_y:.2f}",
+                    "reason=" + reason,
+                    flush=True
+                )
+                return
+
+        entries.append({
+            "x": obstacle_x,
+            "y": obstacle_y,
+            "reason": reason,
+            "created_at": now,
+            "updated_at": now,
+            "hit_count": 1
+        })
+
+        max_entries = int(MAP.get("ROS2_VIRTUAL_OBSTACLES_MAX_ENTRIES", 200))
+        if len(entries) > max_entries:
+            entries = entries[-max_entries:]
+
+        self._write_virtual_obstacles(entries)
+        print(
+            "VIRTUAL OBSTACLE MARKED:",
+            f"x={obstacle_x:.2f}",
+            f"y={obstacle_y:.2f}",
+            "reason=" + reason,
+            flush=True
+        )
+
     def _threshold_push_allowed(self, block_reason, recovery_context):
 
         context = recovery_context or {}
@@ -568,8 +703,12 @@ class MotorService:
         use_slowdown=True,
         stop_distance_cm=None,
         slow_distance_cm=None,
-        minimum_speed_percent=None
+        minimum_speed_percent=None,
+        source=None
     ):
+
+        if source is not None:
+            self.last_drive_source = str(source).strip().lower()
 
         if self.sensor_fault and (abs(float(x)) > 1e-3 or abs(float(y)) > 1e-3):
             self._stop_motor()
@@ -1323,21 +1462,24 @@ class MotorService:
     def _detect_stall_reason(self, driving_forward, stuck_event):
 
         # Single priority-ordered check: IMU stuck event > lidar motion
-        # stall > forward-block timeout. Only IMU/lidar checks require the
-        # robot to actually be driving forward; forward-block timeout can
-        # also fire while turning in place against a blocked path.
-        if driving_forward:
-            if stuck_event:
-                return "imu"
+        # stall > forward-block timeout. IMU stuck detection only runs while
+        # driving forward (see safety_loop), but lidar-motion verification
+        # tracks every drive() call regardless of direction - a pure in-place
+        # pivot (y=0) that fails to actually rotate the robot (scrub friction
+        # against a nearby obstacle) is just as real a stall as a blocked
+        # forward push, so it must be checked here too, not gated behind
+        # driving_forward.
+        if driving_forward and stuck_event:
+            return "imu"
 
-            if self.is_lidar_motion_stalled():
-                print(
-                    "LIDAR STALL: no confirmed motion at max boost, starting recovery",
-                    flush=True
-                )
-                self._lidar_verify_stall_count = 0
-                self.last_block_reason = "lidar_stall"
-                return "lidar_stall"
+        if self.is_lidar_motion_stalled():
+            print(
+                "LIDAR STALL: no confirmed motion at max boost, starting recovery",
+                flush=True
+            )
+            self._lidar_verify_stall_count = 0
+            self.last_block_reason = "lidar_stall"
+            return "lidar_stall"
 
         if self.is_forward_block_stalled():
             print(
@@ -1390,8 +1532,48 @@ class MotorService:
                 if stuck_event:
                     self.stop_for_imu_stuck()
 
-            if self._detect_stall_reason(driving_forward, stuck_event):
-                await self.recover_from_stuck()
+            stall_reason = self._detect_stall_reason(driving_forward, stuck_event)
+
+            if stall_reason:
+                invisible_obstacle = (
+                    stall_reason == "imu"
+                    and self.is_invisible_obstacle_stuck()
+                )
+
+                if invisible_obstacle:
+                    self.mark_virtual_obstacle("imu_stuck_invisible")
+                elif stall_reason == "lidar_stall":
+                    # By definition this only fires after LIDAR_VERIFY_STALL_MISSES_TO_RECOVER
+                    # consecutive misses at max boost - nav2's own BT recovery
+                    # (Spin/BackUp) was driving throughout that window and still
+                    # produced no verified motion, so the spot itself (often a
+                    # low couch base/frame nav2 keeps re-selecting as a frontier)
+                    # is worth remembering even though lidar can see it.
+                    self.mark_virtual_obstacle("lidar_stall")
+
+                if invisible_obstacle or stall_reason == "lidar_stall":
+                    # Either nothing nav2 can perceive is holding us back
+                    # (invisible_obstacle), or nav2's own BT recovery already
+                    # had its full window to clear this and failed
+                    # (lidar_stall) - in both cases our own recovery (starts
+                    # with a straight backup, proven reliable this session)
+                    # must run regardless of drive source.
+                    await self.recover_from_stuck()
+                elif self.last_drive_source in {"nav2", "explore", "ros2"}:
+                    # nav2 has its own BT-level recovery (BackUp/Spin/Wait,
+                    # driven by controller_server's progress checker) that
+                    # reacts to this same stall via normal /drive calls. If we
+                    # also take over here, self.recovering=True blocks those
+                    # nav2-sourced /drive calls (see routes/control.py) for
+                    # the whole IMU recovery run, so nav2's Spin/BackUp appear
+                    # to silently fail ("Exceeded time allowance") while we
+                    # drive underneath it, uncoordinated - confirmed live via
+                    # simultaneous "RECOVERY START: imu" and nav2 behavior_server
+                    # "Running spin"/"backup failed" log lines. Leave the
+                    # stop/blocked state in place and let nav2 own recovery.
+                    pass
+                else:
+                    await self.recover_from_stuck()
 
             await asyncio.sleep(
                 ULTRASONIC["SAFETY_CHECK_INTERVAL_SECONDS"]

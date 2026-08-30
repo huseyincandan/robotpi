@@ -1,0 +1,62 @@
+<!--
+  Based on nav2_bt_navigator's stock navigate_to_pose_w_replanning_and_recovery.xml,
+  with two changes vs stock:
+  1) RoundRobin recovery order is BackUp -> Spin -> Wait instead of Spin -> Wait
+     -> BackUp, since a pure in-place Spin can't generate clearance on this 4WD
+     skid-steer chassis when wedged, and BackUp is what actually creates room to
+     move (matches services/motor.py's own hardware-validated recovery order).
+  2) The stock ReactiveFallback wraps RecoveryActions behind a GoalUpdated check,
+     which returns SUCCESS (skipping RecoveryActions entirely) the instant the
+     blackboard goal changes. explore_lite sends a new goal within the same tick
+     a FollowPath/ComputePathToPose failure is reported, so GoalUpdated fired
+     first every single time and RecoveryActions (ClearingActions/BackUp/Spin/
+     Wait) never ran at all - confirmed live: 0 "Running backup"/"Running spin"
+     log lines despite repeated "Failed to make progress"/"No valid trajectories"
+     errors. The robot just kept re-planning toward whatever new frontier goal
+     explore_lite picked next, from the same wedged pose, so it never physically
+     moved and DWB burned cycles hunting for a valid trajectory near obstacles
+     (visible as excessive in-place-style turning). RecoveryActions now runs
+     directly (GoalUpdated removed) so a stuck robot always gets one real
+     clearing/backup/spin/wait attempt before a new goal is allowed to take over.
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+            <Sequence>
+              <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+            </Sequence>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+          <Sequence>
+            <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+            <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+          </Sequence>
+        </RecoveryNode>
+      </PipelineSequence>
+      <Sequence>
+        <Fallback>
+          <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+          <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+        </Fallback>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <BackUp backup_dist="0.20" backup_speed="0.12" error_code_id="{backup_code_id}"/>
+          <Spin spin_dist="1.57" error_code_id="{spin_error_code}"/>
+          <Wait wait_duration="5.0"/>
+        </RoundRobin>
+      </Sequence>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

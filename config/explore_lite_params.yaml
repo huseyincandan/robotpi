@@ -5,15 +5,40 @@
     costmap_topic: /map
     costmap_updates_topic: /map_updates
     visualize: true
-    planner_frequency: 0.5
-    # Widened from 25.0: Pi 5 CPU load spikes (SLAM+Nav2+ML) can delay
-    # planning/control cycles, and the 1cm goal tolerance meant the robot
-    # could spend most of a 25s window hunting for exact precision without
-    # tripping the progress check, causing a reachable frontier to be
-    # blacklisted and exploration to stop prematurely.
-    progress_timeout: 45.0
-    potential_scale: 3.0
+    # Was 0.5 (re-evaluate/resend goal every 2s). Live-verified this segment
+    # (2026-08-30) via nav2 log timestamps that at 2s cadence the robot has
+    # barely moved between cycles, yet the top-ranked frontier can flip to
+    # the opposite side of the room from one cycle to the next - e.g. goal
+    # sent to (1.93,-1.10) [east] at t=162, then (-1.41,-0.89) [west] at
+    # t=166, then back to (2.19,-1.46) [east] at t=168, all while robot pose
+    # stayed near (0,-0.4). This is the exact "ileri-geri"/oscillating-goal
+    # behavior the user reported. Slowed down so the robot has real time to
+    # make progress toward a goal (and the map to meaningfully update from
+    # that progress) before the frontier ranking is re-evaluated.
+    planner_frequency: 0.15
+    # Was 45.0, matching nav2 controller_server's own movement_time_allowance
+    # (also 45.0). That made the two timeouts a race: explore_lite's own
+    # progress watchdog fired within ~1s of nav2's "Failed to make progress",
+    # and explore_lite immediately cancels+resends a new goal on any abort -
+    # confirmed live via nav2 log: 0 "Running backup"/"Running spin" lines
+    # despite repeated stalls, because explore_lite tore down the goal before
+    # nav2's BT recovery (ClearingActions -> BackUp -> Spin -> Wait) got past
+    # its first, near-instant step. Widened so nav2 gets enough headroom for
+    # at least one full recovery cycle (backup/spin/wait, a few seconds) plus
+    # a fresh 45s attempt at the retried path before explore_lite gives up on
+    # this frontier.
+    progress_timeout: 120.0
+    # Was potential_scale=3.0/gain_scale=1.0/min_frontier_size=0.2: this
+    # strongly favored whichever frontier was NEAREST regardless of size,
+    # so it chased tiny slivers right next to corners/wall edges, and as the
+    # map filled in, distance to two nearby slivers could flip back and
+    # forth, sending the robot to one spot then back near where it just was
+    # (observed live 2026-08-30: goal points looked illogical/oscillating
+    # instead of a smooth sweep). Rebalanced to prefer LARGER, more
+    # information-rich frontiers over merely-closest ones, and raised
+    # min_frontier_size to filter out tiny corner/edge slivers entirely.
+    potential_scale: 1.5
     orientation_scale: 0.0
-    gain_scale: 1.0
+    gain_scale: 2.5
     transform_tolerance: 0.3
-    min_frontier_size: 0.2
+    min_frontier_size: 0.45
