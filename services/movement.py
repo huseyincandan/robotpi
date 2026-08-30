@@ -558,13 +558,6 @@ class MovementService:
 
 		return MOVEMENT["TURN_90_SECONDS"]
 
-	def _time_value_seconds(self, value, unit):
-
-		if unit in ["dakika", "dk"]:
-			return value * 60
-
-		return value
-
 	def _distance_meters(self, normalized):
 
 		if "yarım metre" in normalized or "yarim metre" in normalized:
@@ -629,8 +622,6 @@ class MovementService:
 			return value / 100
 
 		return value
-
-		return None
 
 	def _number_words_value(self, text):
 

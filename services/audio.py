@@ -1,7 +1,3 @@
-from aiortc.contrib.media import (
-	MediaPlayer,
-	MediaRecorder
-)
 import re
 import subprocess
 
@@ -31,43 +27,6 @@ def _clamp_percent(
 			100,
 			int(percent)
 		)
-	)
-
-
-def _audio_options():
-
-	return {
-		"sample_rate": AUDIO["SAMPLE_RATE"],
-		"channels": AUDIO["CHANNELS"]
-	}
-
-
-def _speaker_options():
-
-	options = _audio_options()
-
-	options.update({
-		"buffer_size": AUDIO["SPEAKER_BUFFER_SIZE"]
-	})
-
-	return options
-
-
-def create_microphone_player():
-
-	return MediaPlayer(
-		AUDIO["MICROPHONE_DEVICE"],
-		format=AUDIO["MICROPHONE_FORMAT"],
-		options=_audio_options()
-	)
-
-
-def create_speaker_recorder():
-
-	return MediaRecorder(
-		AUDIO["SPEAKER_DEVICE"],
-		format=AUDIO["SPEAKER_FORMAT"],
-		options=_speaker_options()
 	)
 
 

@@ -12,6 +12,5 @@ openwakeword
 faster-whisper
 openai
 python-dotenv
-yt-dlp
 smbus2
 rplidar-roboticia

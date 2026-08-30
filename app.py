@@ -196,7 +196,6 @@ except Exception as exc:
 
 music = MusicService()
 mapping_provider = str(MAP.get("PROVIDER", "ros2")).lower()
-ros2_provider_enabled = True
 
 map_dir = Path(MAP.get("DIR", "output/maps"))
 if not map_dir.is_absolute():

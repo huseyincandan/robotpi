@@ -292,18 +292,6 @@ class AssistantService:
 			]
 		)
 
-	def _extract_weather_city(self, text):
-
-		match = re.search(
-			r"([A-ZÇĞİÖŞÜ][a-zçğıöşü]+)(?:'|’)?(?:da|de|ta|te)\b",
-			text
-		)
-
-		if match:
-			return match.group(1)
-
-		return WEB["WEATHER_DEFAULT_CITY"]
-
 	def _weather_city_from_text_or_default(
 		self,
 		text,
