@@ -1540,26 +1540,34 @@ class MotorService:
                     and self.is_invisible_obstacle_stuck()
                 )
 
+                nav2_owns_recovery = self.last_drive_source in {"nav2", "explore", "ros2"}
+
+                # lidar_stall's own trigger (~9s at max boost) fires far
+                # earlier than nav2's progress_checker (movement_time_allowance
+                # 45s) ever would, so under nav2 it was preempting nav2's own
+                # BT recovery rather than backstopping it - and our own
+                # recover_once() has no costmap/collision awareness of its own
+                # (see the 2026-08-30 CRITICAL INCIDENT note: nav2's BackUp
+                # correctly refused to move near an obstacle, but our own
+                # recovery then ran anyway and wedged the robot into a
+                # window). So for nav2-sourced driving, lidar_stall (a
+                # visible-to-nav2 case) is left to nav2's own BT recovery,
+                # same as forward_block_stall below.
+                run_own_recovery = invisible_obstacle or (
+                    stall_reason == "lidar_stall" and not nav2_owns_recovery
+                )
+
                 if invisible_obstacle:
                     self.mark_virtual_obstacle("imu_stuck_invisible")
-                elif stall_reason == "lidar_stall":
-                    # By definition this only fires after LIDAR_VERIFY_STALL_MISSES_TO_RECOVER
-                    # consecutive misses at max boost - nav2's own BT recovery
-                    # (Spin/BackUp) was driving throughout that window and still
-                    # produced no verified motion, so the spot itself (often a
-                    # low couch base/frame nav2 keeps re-selecting as a frontier)
-                    # is worth remembering even though lidar can see it.
+                elif stall_reason == "lidar_stall" and not nav2_owns_recovery:
+                    # Nothing left to backstop this since we're not deferring
+                    # to nav2 here - worth remembering the spot (often a low
+                    # couch base/frame) even though lidar can technically see it.
                     self.mark_virtual_obstacle("lidar_stall")
 
-                if invisible_obstacle or stall_reason == "lidar_stall":
-                    # Either nothing nav2 can perceive is holding us back
-                    # (invisible_obstacle), or nav2's own BT recovery already
-                    # had its full window to clear this and failed
-                    # (lidar_stall) - in both cases our own recovery (starts
-                    # with a straight backup, proven reliable this session)
-                    # must run regardless of drive source.
+                if run_own_recovery:
                     await self.recover_from_stuck()
-                elif self.last_drive_source in {"nav2", "explore", "ros2"}:
+                elif nav2_owns_recovery:
                     # nav2 has its own BT-level recovery (BackUp/Spin/Wait,
                     # driven by controller_server's progress checker) that
                     # reacts to this same stall via normal /drive calls. If we
