@@ -384,6 +384,515 @@ async def listen_for_seconds(
 		await listener.stop()
 
 
+class TurnState:
+	# Carries the small set of values that need to persist/mutate across
+	# command-loop turns and intent handlers (previously bare closure
+	# variables inside one giant run_wake_loop function).
+
+	def __init__(self):
+		self.empty_turns = 0
+		self.music_started = False
+		self.session_ended = False
+		self.last_weather_turn = False
+
+
+async def _wait_for_wake_word(listener, music, last_wake):
+
+	wake_hits = 0
+
+	while True:
+		if SpeechService.is_speaking():
+			await listener.stop()
+			await asyncio.sleep(0.1)
+			continue
+
+		if music.is_playing() and not WAKE["LISTEN_DURING_MUSIC"]:
+			await listener.stop()
+			await asyncio.sleep(1)
+			continue
+
+		try:
+			predictions, _ = await listener.listen_once()
+
+			if SpeechService.is_speaking():
+				wake_hits = 0
+				continue
+
+		except Exception as exc:
+			print(
+				"WAKE ERROR:",
+				repr(exc),
+				flush=True
+			)
+			await listener.stop()
+			await asyncio.sleep(1)
+			continue
+
+		score = float(
+			predictions.get(
+				WAKE["MODEL_NAME"],
+				0
+			)
+		)
+		threshold = WAKE["THRESHOLD"]
+		consecutive_detections = WAKE["CONSECUTIVE_DETECTIONS"]
+
+		if music.is_playing():
+			threshold = WAKE["MUSIC_THRESHOLD"]
+			consecutive_detections = WAKE["MUSIC_CONSECUTIVE_DETECTIONS"]
+
+		if score < threshold:
+			wake_hits = 0
+			continue
+
+		wake_hits += 1
+
+		if wake_hits < consecutive_detections:
+			continue
+
+		wake_hits = 0
+
+		now = time.monotonic()
+
+		if now - last_wake < WAKE["COOLDOWN_SECONDS"]:
+			continue
+
+		last_wake = now
+
+		print(
+			"WAKE WORD:",
+			WAKE["MODEL_NAME"],
+			score,
+			flush=True
+		)
+
+		return score, last_wake
+
+
+async def _handle_music_play(intent, music, speech, music_paused_for_wake, state):
+
+	query = intent["query"]
+
+	if music_paused_for_wake:
+		await asyncio.to_thread(
+			music.stop
+		)
+
+	try:
+		station_name = await asyncio.to_thread(
+			music.play,
+			query
+		)
+
+	except Exception as exc:
+		print(
+			"MUSIC PLAY ERROR:",
+			repr(exc),
+			flush=True
+		)
+		await asyncio.to_thread(
+			speech.say,
+			RADIO["ERROR_RESPONSE"]
+		)
+
+		state.empty_turns = 0
+		await asyncio.sleep(0.1)
+		return "continue"
+
+	await asyncio.to_thread(
+		speech.say,
+		f"{RADIO['PLAYING_RESPONSE_PREFIX']}{station_name}."
+	)
+	print(
+		"SESSION ENDED BY MUSIC",
+		flush=True
+	)
+	state.session_ended = True
+	state.music_started = True
+	return "break"
+
+
+async def _handle_music_genres(music, speech, state):
+
+	answer = RADIO["GENRES_LIST_RESPONSE_PREFIX"] + music.list_genres() + "."
+
+	print(
+		"ASSISTANT:",
+		answer,
+		flush=True
+	)
+
+	await asyncio.to_thread(
+		speech.say,
+		answer
+	)
+
+	state.empty_turns = 0
+	await asyncio.sleep(0.1)
+	return "continue"
+
+
+async def _handle_music_stop(music, speech, music_paused_for_wake, state):
+
+	stopped = await asyncio.to_thread(
+		music.stop
+	)
+	await asyncio.to_thread(
+		speech.say,
+		MUSIC["STOP_RESPONSE"] if stopped else MUSIC["NOT_PLAYING_RESPONSE"]
+	)
+
+	if music_paused_for_wake:
+		print(
+			"SESSION ENDED BY MUSIC STOP",
+			flush=True
+		)
+		state.session_ended = True
+		return "break"
+
+	return "continue"
+
+
+async def _handle_music_pause(music, speech, music_paused_for_wake, state):
+
+	paused = await asyncio.to_thread(
+		music.pause
+	)
+
+	if music_paused_for_wake and paused:
+		print(
+			"SESSION ENDED BY MUSIC PAUSE",
+			flush=True
+		)
+		state.session_ended = True
+		return "break"
+
+	await asyncio.to_thread(
+		speech.say,
+		MUSIC["PAUSE_RESPONSE"] if paused else MUSIC["NOT_PLAYING_RESPONSE"]
+	)
+	return "continue"
+
+
+async def _handle_music_resume(music, speech, music_paused_for_wake, state):
+
+	resumed = await asyncio.to_thread(
+		music.resume
+	)
+
+	if music_paused_for_wake and resumed:
+		state.music_started = True
+		print(
+			"SESSION ENDED BY MUSIC RESUME",
+			flush=True
+		)
+		state.session_ended = True
+		return "break"
+
+	await asyncio.to_thread(
+		speech.say,
+		MUSIC["RESUME_RESPONSE"] if resumed else MUSIC["NOT_PLAYING_RESPONSE"]
+	)
+	return "continue"
+
+
+async def _handle_music_next(music, speech, music_paused_for_wake, state):
+
+	changed = await asyncio.to_thread(
+		music.next
+	)
+
+	if music_paused_for_wake and changed:
+		await asyncio.to_thread(
+			music.resume
+		)
+		state.music_started = True
+		print(
+			"SESSION ENDED BY MUSIC NEXT",
+			flush=True
+		)
+		state.session_ended = True
+		return "break"
+
+	await asyncio.to_thread(
+		speech.say,
+		MUSIC["NEXT_RESPONSE"] if changed else MUSIC["NOT_PLAYING_RESPONSE"]
+	)
+	return "continue"
+
+
+async def _handle_music_previous(music, speech, music_paused_for_wake, state):
+
+	changed = await asyncio.to_thread(
+		music.previous
+	)
+
+	if music_paused_for_wake and changed:
+		await asyncio.to_thread(
+			music.resume
+		)
+		state.music_started = True
+		print(
+			"SESSION ENDED BY MUSIC PREVIOUS",
+			flush=True
+		)
+		state.session_ended = True
+		return "break"
+
+	await asyncio.to_thread(
+		speech.say,
+		MUSIC["PREVIOUS_RESPONSE"] if changed else MUSIC["NOT_PLAYING_RESPONSE"]
+	)
+	return "continue"
+
+
+async def _handle_audio_volume(intent, text, music, speech, music_paused_for_wake, state):
+
+	volume = await asyncio.to_thread(
+		apply_volume_command,
+		intent["query"] or text,
+		music
+	)
+	answer = f"Ses seviyesi yüzde {volume}."
+
+	print(
+		"ASSISTANT:",
+		answer,
+		flush=True
+	)
+
+	if music_paused_for_wake:
+		await asyncio.to_thread(
+			music.resume
+		)
+		state.music_started = True
+		print(
+			"MUSIC RESUMED AFTER VOLUME COMMAND",
+			flush=True
+		)
+		return "break"
+
+	await asyncio.to_thread(
+		speech.say,
+		answer
+	)
+
+	state.empty_turns = 0
+	await asyncio.sleep(0.1)
+	return "continue"
+
+
+async def _handle_local_time(text, local_info, speech, state):
+
+	answer = local_info.answer(text)
+
+	print(
+		"ASSISTANT:",
+		answer,
+		flush=True
+	)
+
+	await asyncio.to_thread(
+		speech.say,
+		answer
+	)
+
+	await asyncio.sleep(
+		SPEECH["ASSISTANT_RESPONSE_PAUSE"]
+	)
+
+	state.empty_turns = 0
+	await asyncio.sleep(0.1)
+	return "continue"
+
+
+async def _handle_robot_move(intent, text, movement, music, speech, music_paused_for_wake, state):
+
+	if not movement:
+		answer = "Motor servisi hazır değil."
+
+	else:
+		answer = await asyncio.to_thread(
+			movement.execute,
+			intent["query"] or text
+		)
+
+	print(
+		"ASSISTANT:",
+		answer,
+		flush=True
+	)
+
+	if music_paused_for_wake:
+		await asyncio.to_thread(
+			music.resume
+		)
+		state.music_started = True
+		print(
+			"MUSIC RESUMED AFTER MOVE COMMAND",
+			flush=True
+		)
+		return "break"
+
+	await asyncio.to_thread(
+		speech.say,
+		answer
+	)
+
+	await asyncio.sleep(
+		SPEECH["ASSISTANT_RESPONSE_PAUSE"]
+	)
+
+	state.empty_turns = 0
+	await asyncio.sleep(0.1)
+	return "continue"
+
+
+async def _handle_system_shutdown(speech, system):
+
+	await asyncio.to_thread(
+		speech.say,
+		SYSTEM["SHUTDOWN_RESPONSE"]
+	)
+	await asyncio.to_thread(
+		system.shutdown
+	)
+	print(
+		"SYSTEM SHUTDOWN REQUESTED",
+		flush=True
+	)
+	return "shutdown"
+
+
+async def _handle_web_search(text, intent, assistant, speech, state):
+
+	state.last_weather_turn = assistant._looks_like_weather(
+		text
+	) or assistant._looks_like_weather(
+		intent["query"]
+	)
+
+	step_start = time.monotonic()
+	answer = await asyncio.to_thread(
+		assistant.ask_with_web,
+		text,
+		intent["query"]
+	)
+	log_timing(
+		"assistant_web_answer",
+		step_start
+	)
+
+	print(
+		"ASSISTANT:",
+		answer,
+		flush=True
+	)
+
+	step_start = time.monotonic()
+	await asyncio.to_thread(
+		speech.say,
+		answer
+	)
+	log_timing(
+		"assistant_tts",
+		step_start
+	)
+
+	await asyncio.sleep(
+		SPEECH["ASSISTANT_RESPONSE_PAUSE"]
+	)
+
+	state.empty_turns = 0
+	await asyncio.sleep(0.1)
+	return "continue"
+
+
+async def _handle_chat_fallback(text, assistant, speech, music, music_paused_for_wake, state):
+
+	if music_paused_for_wake:
+		await asyncio.to_thread(
+			music.stop
+		)
+
+	step_start = time.monotonic()
+	answer = await asyncio.to_thread(
+		assistant.ask,
+		text
+	)
+	log_timing(
+		"assistant_answer",
+		step_start
+	)
+
+	print(
+		"ASSISTANT:",
+		answer,
+		flush=True
+	)
+
+	step_start = time.monotonic()
+	await asyncio.to_thread(
+		speech.say,
+		answer
+	)
+	log_timing(
+		"assistant_tts",
+		step_start
+	)
+
+	await asyncio.sleep(
+		SPEECH["ASSISTANT_RESPONSE_PAUSE"]
+	)
+
+	state.empty_turns = 0
+	await asyncio.sleep(0.1)
+	return "continue"
+
+
+async def _dispatch_intent(intent, text, state, *, music, speech, movement, assistant, system, local_info, music_paused_for_wake):
+
+	intent_type = intent["type"]
+
+	if intent_type == "music.play":
+		return await _handle_music_play(intent, music, speech, music_paused_for_wake, state)
+
+	if intent_type == "music.genres":
+		return await _handle_music_genres(music, speech, state)
+
+	if intent_type == "music.stop":
+		return await _handle_music_stop(music, speech, music_paused_for_wake, state)
+
+	if intent_type == "music.pause":
+		return await _handle_music_pause(music, speech, music_paused_for_wake, state)
+
+	if intent_type == "music.resume":
+		return await _handle_music_resume(music, speech, music_paused_for_wake, state)
+
+	if intent_type == "music.next":
+		return await _handle_music_next(music, speech, music_paused_for_wake, state)
+
+	if intent_type == "music.previous":
+		return await _handle_music_previous(music, speech, music_paused_for_wake, state)
+
+	if intent_type == "audio.volume":
+		return await _handle_audio_volume(intent, text, music, speech, music_paused_for_wake, state)
+
+	if intent_type == "local.time":
+		return await _handle_local_time(text, local_info, speech, state)
+
+	if intent_type == "robot.move":
+		return await _handle_robot_move(intent, text, movement, music, speech, music_paused_for_wake, state)
+
+	if intent_type == "system.shutdown":
+		return await _handle_system_shutdown(speech, system)
+
+	if intent_type == "web.search":
+		return await _handle_web_search(text, intent, assistant, speech, state)
+
+	return await _handle_chat_fallback(text, assistant, speech, music, music_paused_for_wake, state)
+
+
 async def run_wake_loop(
 	motor=None,
 	music=None,
@@ -404,7 +913,6 @@ async def run_wake_loop(
 	system = SystemService()
 	music = music or MusicService()
 	last_wake = 0
-	wake_hits = 0
 	stt_task = asyncio.create_task(
 		asyncio.to_thread(
 			stt.load
@@ -421,69 +929,10 @@ async def run_wake_loop(
 
 	try:
 		while True:
-			if SpeechService.is_speaking():
-				await listener.stop()
-				await asyncio.sleep(0.1)
-				continue
-
-			if music.is_playing() and not WAKE["LISTEN_DURING_MUSIC"]:
-				await listener.stop()
-				await asyncio.sleep(1)
-				continue
-
-			try:
-				predictions, _ = await listener.listen_once()
-
-				if SpeechService.is_speaking():
-					wake_hits = 0
-					continue
-
-			except Exception as exc:
-				print(
-					"WAKE ERROR:",
-					repr(exc),
-					flush=True
-				)
-				await listener.stop()
-				await asyncio.sleep(1)
-				continue
-
-			score = float(
-				predictions.get(
-					WAKE["MODEL_NAME"],
-					0
-				)
-			)
-			threshold = WAKE["THRESHOLD"]
-			consecutive_detections = WAKE["CONSECUTIVE_DETECTIONS"]
-
-			if music.is_playing():
-				threshold = WAKE["MUSIC_THRESHOLD"]
-				consecutive_detections = WAKE["MUSIC_CONSECUTIVE_DETECTIONS"]
-
-			if score < threshold:
-				wake_hits = 0
-				continue
-
-			wake_hits += 1
-
-			if wake_hits < consecutive_detections:
-				continue
-
-			wake_hits = 0
-
-			now = time.monotonic()
-
-			if now - last_wake < WAKE["COOLDOWN_SECONDS"]:
-				continue
-
-			last_wake = now
-
-			print(
-				"WAKE WORD:",
-				WAKE["MODEL_NAME"],
-				score,
-				flush=True
+			_, last_wake = await _wait_for_wake_word(
+				listener,
+				music,
+				last_wake
 			)
 
 			try:
@@ -527,10 +976,7 @@ async def run_wake_loop(
 					flush=True
 				)
 
-				empty_turns = 0
-				music_started = False
-				session_ended = False
-				last_weather_turn = False
+				state = TurnState()
 
 				while True:
 					while SpeechService.is_speaking():
@@ -577,7 +1023,7 @@ async def run_wake_loop(
 							flush=True
 						)
 
-						if intent["type"] == "chat" and last_weather_turn:
+						if intent["type"] == "chat" and state.last_weather_turn:
 							weather_query = weather_followup_query(
 								text
 							)
@@ -598,390 +1044,57 @@ async def run_wake_loop(
 								"SESSION ENDED BY COMMAND",
 								flush=True
 							)
-							session_ended = True
+							state.session_ended = True
 							break
 
 						if music_paused_for_wake and intent["type"] not in ["music.stop", "music.pause", "music.resume", "music.next", "music.previous", "music.genres", "robot.move", "audio.volume"]:
 							await asyncio.to_thread(
 								music.resume
 							)
-							music_started = True
+							state.music_started = True
 							print(
 								"IGNORED NON-STOP COMMAND AFTER MUSIC WAKE; MUSIC RESUMED",
 								flush=True
 							)
 							break
 
-						if intent["type"] == "music.play":
-							query = intent["query"]
+						action = await _dispatch_intent(
+							intent,
+							text,
+							state,
+							music=music,
+							speech=speech,
+							movement=movement,
+							assistant=assistant,
+							system=system,
+							local_info=local_info,
+							music_paused_for_wake=music_paused_for_wake
+						)
 
-							if music_paused_for_wake:
-								await asyncio.to_thread(
-									music.stop
-								)
-
-							try:
-								station_name = await asyncio.to_thread(
-									music.play,
-									query
-								)
-
-							except Exception as exc:
-								print(
-									"MUSIC PLAY ERROR:",
-									repr(exc),
-									flush=True
-								)
-								await asyncio.to_thread(
-									speech.say,
-									RADIO["ERROR_RESPONSE"]
-								)
-
-								empty_turns = 0
-								await asyncio.sleep(0.1)
-								continue
-
-							await asyncio.to_thread(
-								speech.say,
-								f"{RADIO['PLAYING_RESPONSE_PREFIX']}{station_name}."
-							)
-							print(
-								"SESSION ENDED BY MUSIC",
-								flush=True
-							)
-							session_ended = True
-							music_started = True
-							break
-
-						if intent["type"] == "music.genres":
-							answer = RADIO["GENRES_LIST_RESPONSE_PREFIX"] + music.list_genres() + "."
-
-							print(
-								"ASSISTANT:",
-								answer,
-								flush=True
-							)
-
-							await asyncio.to_thread(
-								speech.say,
-								answer
-							)
-
-							empty_turns = 0
-							await asyncio.sleep(0.1)
-							continue
-
-						if intent["type"] == "music.stop":
-							stopped = await asyncio.to_thread(
-								music.stop
-							)
-							await asyncio.to_thread(
-								speech.say,
-								MUSIC["STOP_RESPONSE"] if stopped else MUSIC["NOT_PLAYING_RESPONSE"]
-							)
-
-							if music_paused_for_wake:
-								print(
-									"SESSION ENDED BY MUSIC STOP",
-									flush=True
-								)
-								session_ended = True
-								break
-
-							continue
-
-						if intent["type"] == "music.pause":
-							paused = await asyncio.to_thread(
-								music.pause
-							)
-
-							if music_paused_for_wake and paused:
-								print(
-									"SESSION ENDED BY MUSIC PAUSE",
-									flush=True
-								)
-								session_ended = True
-								break
-
-							await asyncio.to_thread(
-								speech.say,
-								MUSIC["PAUSE_RESPONSE"] if paused else MUSIC["NOT_PLAYING_RESPONSE"]
-							)
-							continue
-
-						if intent["type"] == "music.resume":
-							resumed = await asyncio.to_thread(
-								music.resume
-							)
-
-							if music_paused_for_wake and resumed:
-								music_started = True
-								print(
-									"SESSION ENDED BY MUSIC RESUME",
-									flush=True
-								)
-								session_ended = True
-								break
-
-							await asyncio.to_thread(
-								speech.say,
-								MUSIC["RESUME_RESPONSE"] if resumed else MUSIC["NOT_PLAYING_RESPONSE"]
-							)
-							continue
-
-						if intent["type"] == "music.next":
-							changed = await asyncio.to_thread(
-								music.next
-							)
-
-							if music_paused_for_wake and changed:
-								await asyncio.to_thread(
-									music.resume
-								)
-								music_started = True
-								print(
-									"SESSION ENDED BY MUSIC NEXT",
-									flush=True
-								)
-								session_ended = True
-								break
-
-							await asyncio.to_thread(
-								speech.say,
-								MUSIC["NEXT_RESPONSE"] if changed else MUSIC["NOT_PLAYING_RESPONSE"]
-							)
-							continue
-
-						if intent["type"] == "music.previous":
-							changed = await asyncio.to_thread(
-								music.previous
-							)
-
-							if music_paused_for_wake and changed:
-								await asyncio.to_thread(
-									music.resume
-								)
-								music_started = True
-								print(
-									"SESSION ENDED BY MUSIC PREVIOUS",
-									flush=True
-								)
-								session_ended = True
-								break
-
-							await asyncio.to_thread(
-								speech.say,
-								MUSIC["PREVIOUS_RESPONSE"] if changed else MUSIC["NOT_PLAYING_RESPONSE"]
-							)
-							continue
-
-						if intent["type"] == "audio.volume":
-							volume = await asyncio.to_thread(
-								apply_volume_command,
-								intent["query"] or text,
-								music
-							)
-							answer = f"Ses seviyesi yüzde {volume}."
-
-							print(
-								"ASSISTANT:",
-								answer,
-								flush=True
-							)
-
-							if music_paused_for_wake:
-								await asyncio.to_thread(
-									music.resume
-								)
-								music_started = True
-								print(
-									"MUSIC RESUMED AFTER VOLUME COMMAND",
-									flush=True
-								)
-								break
-
-							await asyncio.to_thread(
-								speech.say,
-								answer
-							)
-
-							empty_turns = 0
-							await asyncio.sleep(0.1)
-							continue
-
-						if intent["type"] == "local.time":
-							answer = local_info.answer(text)
-
-							print(
-								"ASSISTANT:",
-								answer,
-								flush=True
-							)
-
-							await asyncio.to_thread(
-								speech.say,
-								answer
-							)
-
-							await asyncio.sleep(
-								SPEECH["ASSISTANT_RESPONSE_PAUSE"]
-							)
-
-							empty_turns = 0
-							await asyncio.sleep(0.1)
-							continue
-
-						if intent["type"] == "robot.move":
-							if not movement:
-								answer = "Motor servisi hazır değil."
-
-							else:
-								answer = await asyncio.to_thread(
-									movement.execute,
-									intent["query"] or text
-								)
-
-							print(
-								"ASSISTANT:",
-								answer,
-								flush=True
-							)
-
-							if music_paused_for_wake:
-								await asyncio.to_thread(
-									music.resume
-								)
-								music_started = True
-								print(
-									"MUSIC RESUMED AFTER MOVE COMMAND",
-									flush=True
-								)
-								break
-
-							await asyncio.to_thread(
-								speech.say,
-								answer
-							)
-
-							await asyncio.sleep(
-								SPEECH["ASSISTANT_RESPONSE_PAUSE"]
-							)
-
-							empty_turns = 0
-							await asyncio.sleep(0.1)
-							continue
-
-						if intent["type"] == "system.shutdown":
-							await asyncio.to_thread(
-								speech.say,
-								SYSTEM["SHUTDOWN_RESPONSE"]
-							)
-							await asyncio.to_thread(
-								system.shutdown
-							)
-							print(
-								"SYSTEM SHUTDOWN REQUESTED",
-								flush=True
-							)
+						if action == "shutdown":
 							return
 
-						if intent["type"] == "web.search":
-							last_weather_turn = assistant._looks_like_weather(
-								text
-							) or assistant._looks_like_weather(
-								intent["query"]
-							)
+						if action == "break":
+							break
 
-							step_start = time.monotonic()
-							answer = await asyncio.to_thread(
-								assistant.ask_with_web,
-								text,
-								intent["query"]
-							)
-							log_timing(
-								"assistant_web_answer",
-								step_start
-							)
-
-							print(
-								"ASSISTANT:",
-								answer,
-								flush=True
-							)
-
-							step_start = time.monotonic()
-							await asyncio.to_thread(
-								speech.say,
-								answer
-							)
-							log_timing(
-								"assistant_tts",
-								step_start
-							)
-
-							await asyncio.sleep(
-								SPEECH["ASSISTANT_RESPONSE_PAUSE"]
-							)
-
-							empty_turns = 0
-							await asyncio.sleep(0.1)
-							continue
-
-						if music_paused_for_wake:
-							await asyncio.to_thread(
-								music.stop
-							)
-
-						step_start = time.monotonic()
-						answer = await asyncio.to_thread(
-							assistant.ask,
-							text
-						)
-						log_timing(
-							"assistant_answer",
-							step_start
-						)
-
-						print(
-							"ASSISTANT:",
-							answer,
-							flush=True
-						)
-
-						step_start = time.monotonic()
-						await asyncio.to_thread(
-							speech.say,
-							answer
-						)
-						log_timing(
-							"assistant_tts",
-							step_start
-						)
-
-						await asyncio.sleep(
-							SPEECH["ASSISTANT_RESPONSE_PAUSE"]
-						)
-
-						empty_turns = 0
-						await asyncio.sleep(0.1)
 						continue
 
-					empty_turns += 1
+					state.empty_turns += 1
 
 					if stt.last_had_audio:
 						print(
 							"STT HEARD AUDIO BUT NO TEXT; LISTENING AGAIN",
 							flush=True
 						)
-						empty_turns = 0
+						state.empty_turns = 0
 						continue
 
-					if empty_turns >= STT["EMPTY_TURNS_TO_SLEEP"]:
+					if state.empty_turns >= STT["EMPTY_TURNS_TO_SLEEP"]:
 						if music_paused_for_wake:
 							await asyncio.to_thread(
 								music.resume
 							)
-							music_started = True
+							state.music_started = True
 							print(
 								"MUSIC RESUMED AFTER FALSE WAKE",
 								flush=True
@@ -991,10 +1104,10 @@ async def run_wake_loop(
 							"SESSION ENDED BY SILENCE",
 							flush=True
 						)
-						session_ended = True
+						state.session_ended = True
 						break
 
-				if not music_started and not music_paused_for_wake:
+				if not state.music_started and not music_paused_for_wake:
 					await asyncio.to_thread(
 						speech.end_beep
 					)
@@ -1012,7 +1125,7 @@ async def run_wake_loop(
 
 				rearm_delay = WAKE["REARM_DELAY_SECONDS"]
 
-				if music_started:
+				if state.music_started:
 					rearm_delay = WAKE["MUSIC_REARM_DELAY_SECONDS"]
 
 				await asyncio.sleep(
@@ -1024,7 +1137,7 @@ async def run_wake_loop(
 					flush=True
 				)
 
-				if not music_started:
+				if not state.music_started:
 					await asyncio.to_thread(
 						speech.ready_beep
 					)
