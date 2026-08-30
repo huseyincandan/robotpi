@@ -4,7 +4,6 @@ import shlex
 import signal
 import subprocess
 import re
-import shutil
 import os
 import time
 from pathlib import Path
@@ -610,7 +609,7 @@ class Ros2SlamService:
                     "mode": "live_map_fallback",
                     "base": str(output_base),
                     "saved": fallback_saved,
-                    "source": str(self.output_file),
+                    "source": "/map",
                     "save_map_result_code": result_code,
                     "save_map_stdout_tail": (completed.stdout or "")[-800:],
                     "save_map_stderr_tail": (completed.stderr or "")[-800:]
@@ -635,22 +634,23 @@ class Ros2SlamService:
 
     def _save_map_fallback(self, output_base):
 
-        source = Path(self.output_file)
-        if not source.exists() or not source.is_file():
-            return []
+        # Uses nav2_map_server's own map_saver_cli (subscribes to the live
+        # /map topic and writes .pgm+.yaml from the real OccupancyGrid
+        # message fields) instead of hand-parsing a `ros2 service call`
+        # repr()-style text response - avoids a fragile text-scraping
+        # dependency and also correctly captures origin orientation, which
+        # the old regex-based version silently hardcoded to 0.
+        completed = self._run_ros2_command(
+            "ros2 run nav2_map_server map_saver_cli "
+            f"-f {shlex.quote(str(output_base))} -t /map "
+            "--occ 0.65 --free 0.25",
+            timeout=20
+        )
 
         target_pgm = output_base.with_suffix(".pgm")
         target_yaml = output_base.with_suffix(".yaml")
 
-        try:
-            shutil.copy2(source, target_pgm)
-            metadata = self._get_dynamic_map_metadata()
-            yaml_text = self._build_map_yaml(
-                image_name=target_pgm.name,
-                metadata=metadata
-            )
-            target_yaml.write_text(yaml_text, encoding="utf-8")
-        except Exception:
+        if completed.returncode != 0:
             return []
 
         saved = []
@@ -660,53 +660,6 @@ class Ros2SlamService:
             saved.append(str(target_yaml))
 
         return saved
-
-    def _get_dynamic_map_metadata(self):
-
-        completed = self._run_ros2_command(
-            "ros2 service call /slam_toolbox/dynamic_map nav_msgs/srv/GetMap '{}'",
-            timeout=20
-        )
-
-        text = (completed.stdout or "") + "\n" + (completed.stderr or "")
-
-        def _extract_float(pattern, default):
-            matched = re.search(pattern, text)
-            if not matched:
-                return float(default)
-            try:
-                return float(matched.group(1))
-            except Exception:
-                return float(default)
-
-        resolution = _extract_float(r"resolution=([0-9eE+\-.]+)", 0.05)
-        origin_x = _extract_float(r"Point\(x=([0-9eE+\-.]+), y=", 0.0)
-        origin_y = _extract_float(r"Point\(x=[0-9eE+\-.]+, y=([0-9eE+\-.]+), z=", 0.0)
-
-        return {
-            "resolution": resolution,
-            "origin_x": origin_x,
-            "origin_y": origin_y
-        }
-
-    def _build_map_yaml(self, image_name, metadata):
-
-        resolution = float(metadata.get("resolution", 0.05))
-        origin_x = float(metadata.get("origin_x", 0.0))
-        origin_y = float(metadata.get("origin_y", 0.0))
-
-        lines = [
-            f"image: {image_name}",
-            "mode: trinary",
-            f"resolution: {resolution:.8f}",
-            f"origin: [{origin_x:.8f}, {origin_y:.8f}, 0.00000000]",
-            "negate: 0",
-            "occupied_thresh: 0.65",
-            "free_thresh: 0.25",
-            ""
-        ]
-
-        return "\n".join(lines)
 
     def close(self):
 
