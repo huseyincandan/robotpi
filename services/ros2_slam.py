@@ -469,15 +469,17 @@ class Ros2SlamService:
         return None
 
     def reset(self):
+        # ros2_cmdvel_bridge.py no longer owns odom pose/TF - robot_localization's
+        # EKF does (see config/ekf.yaml), so resetting odom means resetting the
+        # EKF's internal state estimate via its own native set_pose service.
         odom_reset = self._run_ros2_command(
-            "ros2 service call /robotpi/reset_odom std_srvs/srv/Trigger '{}'",
+            "ros2 service call /set_pose "
+            "robot_localization/srv/SetPose "
+            "'{pose: {header: {frame_id: odom}, "
+            "pose: {pose: {orientation: {w: 1.0}}}}}'",
             timeout=5
         )
-        odom_reset_output = odom_reset.stdout.lower().replace(" ", "")
-        odom_reset_ok = odom_reset.returncode == 0 and (
-            "success=true" in odom_reset_output
-            or "success:true" in odom_reset_output
-        )
+        odom_reset_ok = odom_reset.returncode == 0
 
         completed = self._run_ros2_command(
             "ros2 service call /slam_toolbox/clear_changes slam_toolbox/srv/Clear '{}'",

@@ -297,8 +297,21 @@ MAP = {
     "ROS2_CMDVEL_BRIDGE_APP_BASE_URL": "http://127.0.0.1:5000",
     "ROS2_PYTHON_BIN": "~/.micromamba/envs/ros2_jazzy/bin/python3",
     "ROS2_CMDVEL_TOPIC": "/cmd_vel",
+    # Final fused odom topic (published by robot_localization's EKF, see
+    # ROS2_EKF_PARAMS_FILE) - this is what nav2_params.yaml/collision_monitor
+    # consume. ROS2_ODOM_RAW_TOPIC is the EKF's own unfused input from
+    # ros2_cmdvel_bridge.py (no wheel encoders, so it's a motor/commanded
+    # velocity-derived estimate, not a true wheel odometry source).
     "ROS2_ODOM_TOPIC": "/odom",
+    "ROS2_ODOM_RAW_TOPIC": "/odom_raw",
     "ROS2_ODOM_FRAME": "odom",
+    "ROS2_EKF_PARAMS_FILE": "config/ekf.yaml",
+    # Twist covariances (variance, m/s^2 and rad/s^2) for the raw odom
+    # source's linear.x/angular.z fields - only linear.x is actually fused
+    # (config/ekf.yaml's odom0_config), angular.z is published for
+    # debug/consistency only.
+    "ROS2_ODOM_VX_VARIANCE": 0.01,
+    "ROS2_ODOM_VYAW_VARIANCE": 0.05,
     "ROS2_NAV2_MAX_LINEAR_X": 0.192,
     "ROS2_NAV2_MAX_ANGULAR_Z": 0.45,
     "ROS2_NAV2_MAX_DRIVE_PERCENT": 30.4,
@@ -308,15 +321,19 @@ MAP = {
     "ROS2_NAV2_ANGULAR_SLEW_RATE": 0.45,
     "ROS2_NAV2_MIN_LINEAR_SCALE_AT_MAX_TURN": 0.25,
     "ROS2_CMDVEL_ODOM_RATE_HZ": 50.0,
-    # Fuse the real MPU6050 gyro_z (via GET /imu/motion) into odom yaw instead
-    # of purely integrating commanded angular velocity, since the robot has no
-    # wheel encoders. Falls back to commanded angular velocity automatically
-    # if the IMU endpoint is unreachable/stale. Flip the sign if the robot's
-    # IMU mounting reports positive gyro_z for clockwise (right) turns instead
-    # of the REP103 convention (positive = counter-clockwise/left turn).
-    "ROS2_CMDVEL_IMU_FUSION_ENABLED": True,
-    "ROS2_CMDVEL_IMU_GYRO_SIGN": 1.0,
-    "ROS2_CMDVEL_IMU_STATIONARY_DEADBAND_DPS": 0.5,
+    # Real MPU6050 gyro_z (via GET /imu/motion, polled independently by
+    # scripts/ros2_imu_bridge.py) is fused into yaw by robot_localization's
+    # EKF (config/ekf.yaml) instead of the old hand-rolled Euler integration
+    # here - there are no wheel encoders, so gyro_z is the only closed-loop
+    # heading feedback available. Flip ROS2_IMU_GYRO_SIGN if the robot's IMU
+    # mounting reports positive gyro_z for clockwise (right) turns instead of
+    # the REP103 convention (positive = counter-clockwise/left turn).
+    "ROS2_IMU_TOPIC": "/imu/data",
+    "ROS2_IMU_FRAME": "base_link",
+    "ROS2_IMU_RATE_HZ": 50.0,
+    "ROS2_IMU_GYRO_SIGN": 1.0,
+    "ROS2_IMU_STATIONARY_DEADBAND_DPS": 0.5,
+    "ROS2_IMU_GYRO_Z_VARIANCE": 0.02,
     # There are no wheel encoders, so commanded linear velocity is blindly
     # integrated into odom translation by default. On a slippery floor the
     # wheels can spin while the robot barely moves, which makes Nav2 think

@@ -17,6 +17,8 @@ class Ros2NavigationService:
         self._nav2_process = None
         self._explore_process = None
         self._cmdvel_bridge_process = None
+        self._imu_bridge_process = None
+        self._ekf_process = None
         self.recovery_cancel_event = threading.Event()
         self._setup_bash = str(Path(str(MAP.get("ROS2_SETUP_BASH", "~/ros2_ws/install/setup.bash"))).expanduser())
         self._ros_python_bin = str(Path(str(MAP.get("ROS2_PYTHON_BIN", "~/.micromamba/envs/ros2_jazzy/bin/python3"))).expanduser())
@@ -39,9 +41,17 @@ class Ros2NavigationService:
             explore_params_file = Path.cwd() / explore_params_file
         self._explore_params_file = explore_params_file
         self._cmdvel_bridge_script = Path(__file__).resolve().parents[1] / "scripts" / "ros2_cmdvel_bridge.py"
+        self._imu_bridge_script = Path(__file__).resolve().parents[1] / "scripts" / "ros2_imu_bridge.py"
         self._cmdvel_bridge_log = Path("/tmp/robotpi_cmdvel_bridge.log")
+        self._imu_bridge_log = Path("/tmp/robotpi_imu_bridge.log")
+        self._ekf_log = Path("/tmp/robotpi_ekf.log")
         self._nav2_log = Path("/tmp/robotpi_nav2.log")
         self._explore_log = Path("/tmp/robotpi_explore.log")
+
+        ekf_params_file = Path(str(MAP.get("ROS2_EKF_PARAMS_FILE", "config/ekf.yaml")))
+        if not ekf_params_file.is_absolute():
+            ekf_params_file = Path.cwd() / ekf_params_file
+        self._ekf_params_file = ekf_params_file
 
         if not self.enabled:
             return
@@ -93,7 +103,8 @@ class Ros2NavigationService:
             "velocity_smoother",
             "collision_monitor",
             "opennav_docking",
-            "explore"
+            "explore",
+            "ekf_node"
         ]
 
         for name in names:
@@ -113,7 +124,9 @@ class Ros2NavigationService:
             "lifecycle_manager_navigation",
             "ros2 launch explore_lite",
             "explore_node",
-            "ros2_cmdvel_bridge.py"
+            "ros2_cmdvel_bridge.py",
+            "ros2_imu_bridge.py",
+            "ekf_node"
         ]
 
         for pattern in patterns:
@@ -221,7 +234,10 @@ class Ros2NavigationService:
 
         app_base_url = str(MAP.get("ROS2_CMDVEL_BRIDGE_APP_BASE_URL", "http://127.0.0.1:5000"))
         cmd_vel_topic = str(MAP.get("ROS2_CMDVEL_TOPIC", "/cmd_vel"))
-        odom_topic = str(MAP.get("ROS2_ODOM_TOPIC", "/odom"))
+        # This raw (unfused) topic is the EKF's odom0 input (config/ekf.yaml)
+        # - the final /odom topic nav2 consumes is published by ekf_node
+        # instead (see _start_ekf below), not by this bridge.
+        odom_raw_topic = str(MAP.get("ROS2_ODOM_RAW_TOPIC", "/odom_raw"))
         odom_frame = str(MAP.get("ROS2_ODOM_FRAME", "odom"))
         base_frame = str(MAP.get("ROS2_BASE_FRAME", "base_link"))
         laser_frame = str(MAP.get("ROS2_LIDAR_FRAME_ID", "laser"))
@@ -240,9 +256,8 @@ class Ros2NavigationService:
             MAP.get("ROS2_NAV2_MIN_LINEAR_SCALE_AT_MAX_TURN", 0.25)
         )
         odom_rate_hz = float(MAP.get("ROS2_CMDVEL_ODOM_RATE_HZ", 50.0))
-        imu_fusion_enabled = bool(MAP.get("ROS2_CMDVEL_IMU_FUSION_ENABLED", True))
-        imu_gyro_sign = float(MAP.get("ROS2_CMDVEL_IMU_GYRO_SIGN", 1.0))
-        imu_stationary_deadband_dps = float(MAP.get("ROS2_CMDVEL_IMU_STATIONARY_DEADBAND_DPS", 0.5))
+        odom_vx_variance = float(MAP.get("ROS2_ODOM_VX_VARIANCE", 0.01))
+        odom_vyaw_variance = float(MAP.get("ROS2_ODOM_VYAW_VARIANCE", 0.05))
         lidar_odom_correction_enabled = bool(MAP.get("ROS2_CMDVEL_LIDAR_ODOM_CORRECTION_ENABLED", True))
         lidar_odom_slip_scale = float(MAP.get("ROS2_CMDVEL_LIDAR_ODOM_SLIP_SCALE", 0.35))
         motor_odom_source_enabled = bool(MAP.get("ROS2_CMDVEL_MOTOR_ODOM_SOURCE_ENABLED", True))
@@ -262,7 +277,7 @@ class Ros2NavigationService:
             f"{shlex.quote(ros_python_bin)} {shlex.quote(str(self._cmdvel_bridge_script))} "
             f"--app-base-url {shlex.quote(app_base_url)} "
             f"--cmd-vel-topic {shlex.quote(cmd_vel_topic)} "
-            f"--odom-topic {shlex.quote(odom_topic)} "
+            f"--odom-topic {shlex.quote(odom_raw_topic)} "
             f"--odom-frame {shlex.quote(odom_frame)} "
             f"--base-frame {shlex.quote(base_frame)} "
             f"--laser-frame {shlex.quote(laser_frame)} "
@@ -276,9 +291,8 @@ class Ros2NavigationService:
             f"--angular-slew-rate {shlex.quote(str(angular_slew_rate))} "
             f"--min-linear-scale-at-max-turn {shlex.quote(str(min_linear_scale_at_max_turn))} "
             f"--odom-rate-hz {shlex.quote(str(odom_rate_hz))} "
-            f"--imu-fusion-enabled {shlex.quote(str(imu_fusion_enabled))} "
-            f"--imu-gyro-sign {shlex.quote(str(imu_gyro_sign))} "
-            f"--imu-stationary-deadband-dps {shlex.quote(str(imu_stationary_deadband_dps))} "
+            f"--odom-vx-variance {shlex.quote(str(odom_vx_variance))} "
+            f"--odom-vyaw-variance {shlex.quote(str(odom_vyaw_variance))} "
             f"--lidar-odom-correction-enabled {shlex.quote(str(lidar_odom_correction_enabled))} "
             f"--lidar-odom-slip-scale {shlex.quote(str(lidar_odom_slip_scale))} "
             f"--motor-odom-source-enabled {shlex.quote(str(motor_odom_source_enabled))} "
@@ -297,6 +311,108 @@ class Ros2NavigationService:
 
         self._terminate_process_group(self._cmdvel_bridge_process)
         self._cmdvel_bridge_process = None
+
+    def _start_imu_bridge(self):
+
+        if self._imu_bridge_process is not None and self._imu_bridge_process.poll() is None:
+            return {
+                "status": "OK",
+                "message": "imu bridge already running"
+            }
+
+        if not self._imu_bridge_script.exists():
+            return {
+                "status": "ERROR",
+                "message": f"imu bridge script not found: {self._imu_bridge_script}"
+            }
+
+        app_base_url = str(MAP.get("ROS2_CMDVEL_BRIDGE_APP_BASE_URL", "http://127.0.0.1:5000"))
+        imu_topic = str(MAP.get("ROS2_IMU_TOPIC", "/imu/data"))
+        imu_frame = str(MAP.get("ROS2_IMU_FRAME", MAP.get("ROS2_BASE_FRAME", "base_link")))
+        gyro_sign = float(MAP.get("ROS2_IMU_GYRO_SIGN", 1.0))
+        stationary_deadband_dps = float(MAP.get("ROS2_IMU_STATIONARY_DEADBAND_DPS", 0.5))
+        gyro_z_variance = float(MAP.get("ROS2_IMU_GYRO_Z_VARIANCE", 0.02))
+        rate_hz = float(MAP.get("ROS2_IMU_RATE_HZ", 50.0))
+        ros_python_bin = self._ros_python_bin
+
+        if not Path(ros_python_bin).exists():
+            return {
+                "status": "ERROR",
+                "message": f"ROS2 python not found: {ros_python_bin}"
+            }
+
+        shell_cmd = (
+            f"rm -f {shlex.quote(str(self._imu_bridge_log))} && "
+            f"export PATH={shlex.quote(self._ros_bin_dir)}:$PATH && "
+            f"export LD_LIBRARY_PATH={shlex.quote(self._ros_lib_dir)}:$LD_LIBRARY_PATH && "
+            f"export RMW_IMPLEMENTATION={shlex.quote(self._rmw_implementation)} && "
+            f"source {shlex.quote(self._setup_bash)} && "
+            f"{shlex.quote(ros_python_bin)} {shlex.quote(str(self._imu_bridge_script))} "
+            f"--app-base-url {shlex.quote(app_base_url)} "
+            f"--imu-topic {shlex.quote(imu_topic)} "
+            f"--imu-frame {shlex.quote(imu_frame)} "
+            f"--gyro-sign {shlex.quote(str(gyro_sign))} "
+            f"--stationary-deadband-dps {shlex.quote(str(stationary_deadband_dps))} "
+            f"--gyro-z-variance {shlex.quote(str(gyro_z_variance))} "
+            f"--rate-hz {shlex.quote(str(rate_hz))} "
+            f">> {shlex.quote(str(self._imu_bridge_log))} 2>&1"
+        )
+
+        self._imu_bridge_process = self._spawn_command(shell_cmd)
+        time.sleep(0.3)
+
+        return {
+            "status": "OK",
+            "message": "imu bridge started"
+        }
+
+    def _stop_imu_bridge(self):
+
+        self._terminate_process_group(self._imu_bridge_process)
+        self._imu_bridge_process = None
+
+    def _start_ekf(self):
+
+        if self._ekf_process is not None and self._ekf_process.poll() is None:
+            return {
+                "status": "OK",
+                "message": "ekf already running"
+            }
+
+        if not self._ekf_params_file.exists():
+            return {
+                "status": "ERROR",
+                "message": f"EKF params file not found: {self._ekf_params_file}"
+            }
+
+        odom_topic = str(MAP.get("ROS2_ODOM_TOPIC", "/odom"))
+        use_sim_time = "true" if bool(MAP.get("ROS2_USE_SIM_TIME", False)) else "false"
+
+        shell_cmd = (
+            f"rm -f {shlex.quote(str(self._ekf_log))} && "
+            f"export PATH={shlex.quote(self._ros_bin_dir)}:$PATH && "
+            f"export LD_LIBRARY_PATH={shlex.quote(self._ros_lib_dir)}:$LD_LIBRARY_PATH && "
+            f"export RMW_IMPLEMENTATION={shlex.quote(self._rmw_implementation)} && "
+            f"source {shlex.quote(self._setup_bash)} && "
+            "ros2 run robot_localization ekf_node --ros-args "
+            f"--params-file {shlex.quote(str(self._ekf_params_file))} "
+            f"-p use_sim_time:={use_sim_time} "
+            f"-r odometry/filtered:={shlex.quote(odom_topic)} "
+            f">> {shlex.quote(str(self._ekf_log))} 2>&1"
+        )
+
+        self._ekf_process = self._spawn_command(shell_cmd)
+        time.sleep(0.5)
+
+        return {
+            "status": "OK",
+            "message": "ekf started"
+        }
+
+    def _stop_ekf(self):
+
+        self._terminate_process_group(self._ekf_process)
+        self._ekf_process = None
 
     def _wait_for_cmdvel_bridge_ready(self, timeout_sec=8):
 
@@ -393,23 +509,40 @@ class Ros2NavigationService:
         self._nav2_process = None
         self._explore_process = None
         self._cmdvel_bridge_process = None
+        self._imu_bridge_process = None
+        self._ekf_process = None
 
         bridge_result = self._start_cmdvel_bridge()
         if bridge_result.get("status") != "OK":
             return bridge_result
 
+        imu_bridge_result = self._start_imu_bridge()
+        if imu_bridge_result.get("status") != "OK":
+            self._stop_cmdvel_bridge()
+            return imu_bridge_result
+
+        ekf_result = self._start_ekf()
+        if ekf_result.get("status") != "OK":
+            self._stop_imu_bridge()
+            self._stop_cmdvel_bridge()
+            return ekf_result
+
         # Avoid Nav2 lifecycle activation races by waiting for odom/TF publication.
         if not self._wait_for_cmdvel_bridge_ready(timeout_sec=8):
+            self._stop_ekf()
+            self._stop_imu_bridge()
             self._stop_cmdvel_bridge()
             return {
                 "status": "ERROR",
-                "message": "cmd_vel bridge did not publish odom in time"
+                "message": "EKF did not publish fused odom in time"
             }
 
         if not self._wait_for_nav2_tf_readiness(timeout_sec=20):
             map_frame = str(MAP.get("ROS2_MAP_FRAME", "map"))
             odom_frame = str(MAP.get("ROS2_ODOM_FRAME", "odom"))
             base_frame = str(MAP.get("ROS2_BASE_FRAME", "base_link"))
+            self._stop_ekf()
+            self._stop_imu_bridge()
             self._stop_cmdvel_bridge()
             return {
                 "status": "ERROR",
@@ -449,6 +582,8 @@ class Ros2NavigationService:
         self.stop_exploration()
         self._terminate_process_group(self._nav2_process)
         self._nav2_process = None
+        self._stop_ekf()
+        self._stop_imu_bridge()
         self._stop_cmdvel_bridge()
 
         return {
@@ -572,6 +707,8 @@ class Ros2NavigationService:
             "nav2_status": nav2_status,
             "explore_status": explore_status,
             "cmdvel_bridge_status": self._status_text(self._cmdvel_bridge_process),
+            "imu_bridge_status": self._status_text(self._imu_bridge_process),
+            "ekf_status": self._status_text(self._ekf_process),
             "nav2_running": nav2_status == "running",
             "explore_running": explore_status == "running" and explore_active,
             "explore_process_running": explore_status == "running",

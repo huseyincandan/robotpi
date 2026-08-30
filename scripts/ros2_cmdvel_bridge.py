@@ -14,14 +14,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Range
-from std_srvs.srv import Trigger
-from tf2_ros import TransformBroadcaster
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
-
-
-def _yaw_to_quaternion(yaw):
-    half = yaw * 0.5
-    return (0.0, 0.0, math.sin(half), math.cos(half))
 
 
 class CmdVelBridge(Node):
@@ -64,18 +57,10 @@ class CmdVelBridge(Node):
         self._turn_breakaway_started = None
         self._turn_breakaway_direction = 0
 
-        self.pose_x = 0.0
-        self.pose_y = 0.0
-        self.pose_yaw = 0.0
-        self._last_odom_time = self.get_clock().now()
+        self.odom_vx_variance = max(1e-6, float(args.odom_vx_variance))
+        self.odom_vyaw_variance = max(1e-6, float(args.odom_vyaw_variance))
 
-        self.imu_fusion_enabled = bool(args.imu_fusion_enabled)
-        self.imu_gyro_sign = float(args.imu_gyro_sign)
-        self.imu_stationary_deadband_rad = math.radians(
-            max(0.0, float(args.imu_stationary_deadband_dps))
-        )
         self.imu_max_age_sec = max(0.1, float(args.imu_max_age_sec))
-        self._imu_gyro_z_rad = 0.0
         self._imu_last_update_monotonic = None
 
         self.lidar_odom_correction_enabled = bool(args.lidar_odom_correction_enabled)
@@ -105,14 +90,8 @@ class CmdVelBridge(Node):
             args.odom_topic,
             10
         )
-        self.tf_broadcaster = TransformBroadcaster(self)
         self.static_tf_broadcaster = StaticTransformBroadcaster(self)
         self._publish_laser_transform()
-        self.reset_odom_service = self.create_service(
-            Trigger,
-            "/robotpi/reset_odom",
-            self._reset_odom
-        )
 
         self.drive_timer = self.create_timer(
             max(0.02, 1.0 / max(5.0, float(args.drive_rate_hz))),
@@ -124,11 +103,11 @@ class CmdVelBridge(Node):
             self._odom_loop
         )
 
-        # IMU yaw fusion, lidar-based odom slip correction and the motor's
-        # actual drive percentage are all read from the same /imu/motion HTTP
-        # response, so any one of these features being enabled is enough to
-        # start polling it.
-        if self.imu_fusion_enabled or self.lidar_odom_correction_enabled or self.motor_odom_source_enabled:
+        # Lidar-based odom slip correction and the motor's actual drive
+        # percentage are both read from the same /imu/motion HTTP response
+        # (gyro_z itself is now polled independently by ros2_imu_bridge.py
+        # and fused by robot_localization's EKF instead of here).
+        if self.lidar_odom_correction_enabled or self.motor_odom_source_enabled:
             self.imu_timer = self.create_timer(
                 max(0.02, 1.0 / max(5.0, float(args.imu_rate_hz))),
                 self._imu_loop
@@ -142,7 +121,7 @@ class CmdVelBridge(Node):
         self.get_logger().info(
             "cmd_vel bridge started "
             f"cmd_vel={args.cmd_vel_topic} odom={args.odom_topic} "
-            f"drive={self.drive_endpoint} imu_fusion={self.imu_fusion_enabled}"
+            f"drive={self.drive_endpoint}"
         )
 
     def _imu_loop(self):
@@ -163,8 +142,6 @@ class CmdVelBridge(Node):
         if payload.get("status") != "OK":
             return
 
-        gyro_z_dps = float(payload.get("gyro_z_dps", 0.0))
-        self._imu_gyro_z_rad = self.imu_gyro_sign * math.radians(gyro_z_dps)
         self._imu_last_update_monotonic = time.monotonic()
 
         # Same HTTP round-trip also carries the motor's lidar omnidirectional
@@ -250,18 +227,6 @@ class CmdVelBridge(Node):
             f"x={self.laser_x_offset:.3f}"
         )
 
-    def _reset_odom(self, request, response):
-
-        _ = request
-        self.pose_x = 0.0
-        self.pose_y = 0.0
-        self.pose_yaw = 0.0
-        self._last_odom_time = self.get_clock().now()
-        response.success = True
-        response.message = "odometry reset"
-        self.get_logger().info("odometry pose reset to origin")
-        return response
-
     def _on_cmd_vel(self, msg):
 
         self.current_linear = float(msg.linear.x)
@@ -346,13 +311,10 @@ class CmdVelBridge(Node):
 
     def _odom_loop(self):
 
-        now = self.get_clock().now()
-        dt = (now - self._last_odom_time).nanoseconds / 1e9
-        self._last_odom_time = now
-
-        if dt <= 0.0:
-            return
-
+        # This publishes a raw velocity-only source (/odom_raw) for
+        # robot_localization's EKF to fuse - no local pose integration or
+        # odom->base_link TF here anymore (the EKF owns both, see
+        # config/ekf.yaml and services/ros2_navigation.py).
         v = self.current_linear
         w = self.current_angular
 
@@ -367,30 +329,6 @@ class CmdVelBridge(Node):
             v = (self._motor_y_percent / self.max_drive) * self.max_linear
 
         if (
-            self.imu_fusion_enabled
-            and self._imu_last_update_monotonic is not None
-            and (time.monotonic() - self._imu_last_update_monotonic) <= self.imu_max_age_sec
-        ):
-            # Use the real measured yaw rate instead of the commanded one:
-            # there are no wheel encoders, so this is the only closed-loop
-            # feedback available for heading (translation is still open-loop).
-            w = self._imu_gyro_z_rad
-
-            motor_feedback_fresh = (
-                self._motor_last_update_monotonic is not None
-                and (time.monotonic() - self._motor_last_update_monotonic) <= self.imu_max_age_sec
-            )
-            robot_commanded_still = (
-                motor_feedback_fresh
-                and abs(self._motor_x_percent) < 0.5
-                and abs(self._motor_y_percent) < 0.5
-                and abs(self.current_linear) < 1e-6
-                and abs(self.current_angular) < 1e-6
-            )
-            if robot_commanded_still and abs(w) <= self.imu_stationary_deadband_rad:
-                w = 0.0
-
-        if (
             self.lidar_odom_correction_enabled
             and abs(v) > 1e-6
             and self._lidar_motion_verified is False
@@ -400,50 +338,32 @@ class CmdVelBridge(Node):
             # No wheel encoders means translation is otherwise fully open-loop.
             # The lidar explicitly reports too little motion for the commanded
             # drive (wheel slip on a slippery floor, or a stall) so scale the
-            # velocity used for odom integration down accordingly. This makes
-            # Nav2's own pose estimate reflect reality instead of the ideal
-            # commanded motion, so it naturally keeps driving toward the goal
-            # (instead of believing it already arrived) until the lidar
-            # confirms real progress again.
+            # velocity used for odom down accordingly. This makes the EKF's
+            # (and therefore Nav2's) pose estimate reflect reality instead of
+            # the ideal commanded motion, so it naturally keeps driving toward
+            # the goal (instead of believing it already arrived) until the
+            # lidar confirms real progress again.
             v *= self.lidar_odom_slip_scale
 
-        self.pose_yaw += w * dt
-        self.pose_x += v * math.cos(self.pose_yaw) * dt
-        self.pose_y += v * math.sin(self.pose_yaw) * dt
-
-        qx, qy, qz, qw = _yaw_to_quaternion(self.pose_yaw)
-
         odom = Odometry()
-        odom.header.stamp = now.to_msg()
+        odom.header.stamp = self.get_clock().now().to_msg()
         odom.header.frame_id = self.odom_frame
         odom.child_frame_id = self.base_frame
 
-        odom.pose.pose.position.x = float(self.pose_x)
-        odom.pose.pose.position.y = float(self.pose_y)
-        odom.pose.pose.position.z = 0.0
-        odom.pose.pose.orientation.x = qx
-        odom.pose.pose.orientation.y = qy
-        odom.pose.pose.orientation.z = qz
-        odom.pose.pose.orientation.w = qw
+        # Pose is intentionally left at identity/zero - odom0_config in
+        # config/ekf.yaml only fuses twist.linear.x from this source, so the
+        # EKF does the one authoritative position/yaw integration itself.
+        odom.pose.pose.orientation.w = 1.0
 
         odom.twist.twist.linear.x = float(v)
         odom.twist.twist.angular.z = float(w)
+        # Row-major 6x6 covariance; only the fused field (linear.x, index 0)
+        # needs a realistic value - there are no wheel encoders, so this is
+        # an open-loop estimate and shouldn't be over-trusted by the EKF.
+        odom.twist.covariance[0] = self.odom_vx_variance
+        odom.twist.covariance[35] = self.odom_vyaw_variance
 
         self.odom_pub.publish(odom)
-
-        transform = TransformStamped()
-        transform.header.stamp = now.to_msg()
-        transform.header.frame_id = self.odom_frame
-        transform.child_frame_id = self.base_frame
-        transform.transform.translation.x = float(self.pose_x)
-        transform.transform.translation.y = float(self.pose_y)
-        transform.transform.translation.z = 0.0
-        transform.transform.rotation.x = qx
-        transform.transform.rotation.y = qy
-        transform.transform.rotation.z = qz
-        transform.transform.rotation.w = qw
-
-        self.tf_broadcaster.sendTransform(transform)
 
     def stop_robot(self):
 
@@ -479,9 +399,8 @@ def parse_args():
     parser.add_argument("--command-timeout-sec", type=float, default=0.45)
     parser.add_argument("--drive-rate-hz", type=float, default=14.0)
     parser.add_argument("--odom-rate-hz", type=float, default=20.0)
-    parser.add_argument("--imu-fusion-enabled", type=lambda v: str(v).lower() not in ("0", "false", "no"), default=True)
-    parser.add_argument("--imu-gyro-sign", type=float, default=1.0)
-    parser.add_argument("--imu-stationary-deadband-dps", type=float, default=0.5)
+    parser.add_argument("--odom-vx-variance", type=float, default=0.01)
+    parser.add_argument("--odom-vyaw-variance", type=float, default=0.05)
     parser.add_argument("--imu-rate-hz", type=float, default=20.0)
     parser.add_argument("--imu-max-age-sec", type=float, default=0.5)
     parser.add_argument("--lidar-odom-correction-enabled", type=lambda v: str(v).lower() not in ("0", "false", "no"), default=True)

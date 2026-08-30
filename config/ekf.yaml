@@ -1,0 +1,55 @@
+# robot_localization EKF - replaces the previous hand-rolled odom/IMU fusion
+# in scripts/ros2_cmdvel_bridge.py's _odom_loop() (naive Euler integration
+# with ad-hoc if/else gyro/deadband logic) with a proper covariance-weighted
+# Kalman filter, using nav2's own recommended localization package.
+#
+# Inputs:
+#  - /odom_raw (nav_msgs/Odometry, from ros2_cmdvel_bridge.py): the only
+#    translation-velocity source available (no wheel encoders - derived from
+#    commanded/motor-actual drive percentage). Only vx is fused; this node
+#    does its own pose integration, so odom_raw's own pose fields are not
+#    trusted/fused (would be a redundant/circular double-integration).
+#  - /imu/data (sensor_msgs/Imu, from ros2_imu_bridge.py): MPU6050 gyro_z
+#    only. No magnetometer, so absolute yaw (orientation) is unobservable -
+#    only angular_velocity.z (yaw rate) is fused, matching what the old
+#    hand-rolled code did, but now via a real filter instead of raw addition.
+#
+# Output: /odometry/filtered (remapped to /odom at launch in
+# services/ros2_navigation.py) + the odom->base_link TF (publish_tf: true) -
+# ros2_cmdvel_bridge.py no longer broadcasts that transform itself.
+ekf_filter_node:
+  ros__parameters:
+    use_sim_time: false
+    frequency: 20.0
+    two_d_mode: true
+    publish_tf: true
+    publish_acceleration: false
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+    transform_time_offset: 0.0
+    transform_timeout: 0.2
+
+    odom0: /odom_raw
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  false, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 5
+    odom0_nodelay: true
+
+    imu0: /imu/data
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+    imu0_differential: false
+    imu0_relative: false
+    imu0_remove_gravitational_acceleration: true
+    imu0_queue_size: 10
+    imu0_nodelay: true
