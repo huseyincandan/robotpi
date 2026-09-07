@@ -1,4 +1,15 @@
 # Motor kontrolu artik Pi GPIO'sundan degil, donanim UART ile bagli ESP32-S3 (MotorEspS3.ino) uzerinden yapiliyor.
+# 2026-09-07: joystick (manuel) ve nav2 donuslerinin ikisi de ayri ayri
+# ayarlaniyordu - canli testte manuel x=40 (~%40) 0.6s'de ~150 derece donmesi
+# asiri agresif bulundu. Tek bir paylasilan tavan ile ikisi de ayni
+# yumusaklikta tutuluyor (bkz. MOTOR.MAX_TURN_PERCENT ve
+# MAP.ROS2_NAV2_MAX_TURN_PERCENT/ROS2_NAV2_TURN_HOLD_PERCENT).
+# Ilk denemede 30.0 verildi, ama canli testte (farkli sure ile karsilastirilmis
+# olsa da) beklenenden cok daha yavas donduk - dusuk yuzdede patinaj/tutunamama
+# riski de var. 36.0'a yukseltildi, ayni sure (0.6s) ile adil karsilastirma
+# yapilarak dogrulandi.
+SHARED_MAX_TURN_PERCENT = 36.0
+
 MOTOR_SERIAL = {
     "PORT": "/dev/ttyAMA0",
     "PORT_CANDIDATES": ["/dev/ttyUSB*", "/dev/ttyACM*", "/dev/serial0"],
@@ -41,6 +52,9 @@ ULTRASONIC = {
 MOTOR = {
     "MIN_EFFECTIVE_LINEAR_PERCENT": 12.0,
     "MIN_EFFECTIVE_TURN_PERCENT": 8.0,
+    # Manuel/joystick donusler icin ust sinir - nav2 ile ortak, bkz. yukaridaki
+    # SHARED_MAX_TURN_PERCENT notu.
+    "MAX_TURN_PERCENT": SHARED_MAX_TURN_PERCENT,
     "LIDAR_VERIFY_ENABLED": True,
     "LIDAR_VERIFY_INTERVAL_SECONDS": 0.45,
     "LIDAR_VERIFY_MIN_DELTA_CM_LINEAR": 0.25,
@@ -368,8 +382,8 @@ MAP = {
     "ROS2_NAV2_MAX_LINEAR_X": 0.144,
     "ROS2_NAV2_MAX_ANGULAR_Z": 0.34,
     "ROS2_NAV2_MAX_DRIVE_PERCENT": 22.8,
-    "ROS2_NAV2_MAX_TURN_PERCENT": 43.5,
-    "ROS2_NAV2_TURN_HOLD_PERCENT": 43.5,
+    "ROS2_NAV2_MAX_TURN_PERCENT": SHARED_MAX_TURN_PERCENT,
+    "ROS2_NAV2_TURN_HOLD_PERCENT": SHARED_MAX_TURN_PERCENT,
     "ROS2_NAV2_TURN_BREAKAWAY_SECONDS": 0.20,
     "ROS2_NAV2_ANGULAR_SLEW_RATE": 0.45,
     "ROS2_NAV2_MIN_LINEAR_SCALE_AT_MAX_TURN": 0.25,

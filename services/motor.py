@@ -858,6 +858,10 @@ class MotorService:
 
         x, y = self._apply_minimum_effective_command(x, y)
 
+        max_turn = float(MOTOR.get("MAX_TURN_PERCENT", 100.0))
+        if abs(x) > max_turn:
+            x = max_turn if x > 0 else -max_turn
+
         if y > 0:
             if use_forward_safety:
                 y = self.safe_forward_speed(
