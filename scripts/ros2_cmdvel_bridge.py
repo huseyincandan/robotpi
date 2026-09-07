@@ -56,6 +56,7 @@ class CmdVelBridge(Node):
         self._last_drive_monotonic = time.monotonic()
         self._turn_breakaway_started = None
         self._turn_breakaway_direction = 0
+        self._last_sent_was_idle = True
 
         self.odom_vx_variance = max(1e-6, float(args.odom_vx_variance))
         self.odom_vyaw_variance = max(1e-6, float(args.odom_vyaw_variance))
@@ -285,7 +286,17 @@ class CmdVelBridge(Node):
         )
         y_percent *= linear_scale
 
+        # nav2 idle iken bile bu 0,0'i tekrar tekrar gondermek ESP32'nin
+        # paylasilan UART hattinda ayni motorWrite()'i cagiran web arayuzuyle
+        # (robomotor.local) yarisiyordu - kullanicinin butona basili tuttugu
+        # komutu her ~50-100ms'de bir sifirlayip "kesik kesik" donmeye yol
+        # aciyordu. Idle'a gecis kenarinda TEK sefer 0,0 gonderilir, tekrar
+        # hareket komutu gelene kadar sessiz kalinir.
+        is_idle = abs(x_percent) < 0.01 and abs(y_percent) < 0.01
+        if is_idle and self._last_sent_was_idle:
+            return
         self._send_drive(x_percent, y_percent)
+        self._last_sent_was_idle = is_idle
 
     def _send_drive(self, x_percent, y_percent):
 

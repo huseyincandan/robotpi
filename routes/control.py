@@ -364,7 +364,7 @@ def register_control_routes(
             # Was gated on bypass_forward_safety (nav2/explore/ros2 only), which
             # meant manual/joystick reverse never got a lidar rear check at all -
             # any source can back into something, so always check.
-            rear_clear, rear_cm = motor.rear_motion_clear()
+            rear_clear, rear_cm = motor.rear_motion_clear(x=x)
             if not rear_clear:
                 motor.stop()
                 return {
@@ -441,6 +441,90 @@ def register_control_routes(
             "lidar_motion_score": getattr(motor, "last_lidar_motion_score", None),
             "lidar_verify_boost_percent": float(getattr(motor, "_lidar_verify_boost_percent", 0.0))
         }
+
+    @router.post("/motor/firmware_test_mode")
+    async def motor_firmware_test_mode(enabled: bool = True, timeout_ms: int = 2000, duration_s: int = 30):
+        # TEMP DIAGNOSTIC (2026-08-31): widens/restores the S3 firmware's
+        # PI_CMD_TIMEOUT_MS auto-stop window (requires the matching TESTMODE
+        # firmware change to be flashed) to test whether it contributes to
+        # choppy pivots. Remove once the rotation investigation concludes.
+        if enabled:
+            sent = motor.enable_firmware_test_mode(timeout_ms=timeout_ms, duration_s=duration_s)
+        else:
+            sent = motor.disable_firmware_test_mode()
+
+        return {"status": "OK" if sent else "ERROR", "enabled": enabled}
+
+    @router.post("/motor/raw_wheel_test")
+    async def motor_raw_wheel_test(motor_name: str, direction: str, speed: int = 200, duration_ms: int = 400):
+        # TEMP DIAGNOSTIC (2026-08-30): isolate per-wheel hardware fault behind
+        # the LEFT-pivot (x>0) total rotation failure - bypasses ALL safety
+        # checks (ultrasonic/lidar/IMU), sends a raw firmware SET command for
+        # a single wheel then an explicit STOP. Remove once diagnosed.
+        motor_name = motor_name.strip().upper()
+        direction = direction.strip().lower()
+        if motor_name not in ("FL", "FR", "RL", "RR") or direction not in ("fwd", "bwd"):
+            return {"status": "ERROR", "message": "motor_name must be FL/FR/RL/RR, direction fwd/bwd"}
+
+        speed = max(0, min(255, int(speed)))
+        duration_ms = max(50, min(15000, int(duration_ms)))
+
+        # firmware auto-stops 250ms after the last serial command, so resend periodically.
+        # TEMP: track actual resend gaps to check if event-loop delay is causing the
+        # firmware's auto-stop to trigger between resends (reported "choppy" spin).
+        sent = False
+        elapsed_ms = 0
+        last_send_time = time.monotonic()
+        max_gap_ms = 0.0
+        gaps_over_250ms = 0
+        while elapsed_ms < duration_ms:
+            now = time.monotonic()
+            gap_ms = (now - last_send_time) * 1000.0
+            last_send_time = now
+            if gap_ms > max_gap_ms:
+                max_gap_ms = gap_ms
+            if gap_ms > 250:
+                gaps_over_250ms += 1
+            sent = motor._send_line(f"SET {motor_name} {direction} {speed}")
+            await asyncio.sleep(0.15)
+            elapsed_ms += 150
+        motor._send_line("STOP")
+
+        return {
+            "status": "OK" if sent else "ERROR",
+            "motor": motor_name,
+            "direction": direction,
+            "speed": speed,
+            "max_resend_gap_ms": round(max_gap_ms, 1),
+            "resend_gaps_over_250ms": gaps_over_250ms
+        }
+
+    @router.post("/motor/raw_dual_wheel_test")
+    async def motor_raw_dual_wheel_test(motor_a: str, motor_b: str, direction: str = "fwd", speed: int = 220, duration_ms: int = 10000):
+        # TEMP DIAGNOSTIC (2026-08-30): spin two wheels side-by-side at the same
+        # speed/direction for direct visual left/right comparison. Bypasses ALL
+        # safety checks - only for use with the robot lifted off the ground.
+        # Remove once diagnosed.
+        motor_a = motor_a.strip().upper()
+        motor_b = motor_b.strip().upper()
+        direction = direction.strip().lower()
+        if motor_a not in ("FL", "FR", "RL", "RR") or motor_b not in ("FL", "FR", "RL", "RR") or direction not in ("fwd", "bwd"):
+            return {"status": "ERROR", "message": "motor_a/motor_b must be FL/FR/RL/RR, direction fwd/bwd"}
+
+        speed = max(0, min(255, int(speed)))
+        duration_ms = max(50, min(15000, int(duration_ms)))
+
+        # firmware auto-stops 250ms after the last serial command, so resend periodically
+        sent_a = sent_b = False
+        elapsed_ms = 0
+        while elapsed_ms < duration_ms:
+            sent_a = motor._send_line(f"SET {motor_a} {direction} {speed}")
+            sent_b = motor._send_line(f"SET {motor_b} {direction} {speed}")
+            await asyncio.sleep(0.15)
+            elapsed_ms += 150
+        motor._send_line("STOP")
+
+        return {"status": "OK" if (sent_a and sent_b) else "ERROR", "motor_a": motor_a, "motor_b": motor_b, "direction": direction, "speed": speed}
 
     @router.get("/ultrasonic/readings")
     async def ultrasonic_readings():
@@ -1052,6 +1136,25 @@ def register_control_routes(
             while True:
                 data = await websocket.receive_json()
 
+                # motor.drive() blocks on serial I/O + a lidar sample every
+                # call; a fast joystick (raw pointermove, unthrottled) can
+                # queue messages faster than that, so drain the backlog and
+                # only ever act on the freshest one - otherwise stale turn/
+                # forward commands pile up and execute late (laggy, wrong-
+                # looking direction once they finally drain).
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(
+                            websocket.receive_text(),
+                            timeout=0.001
+                        )
+                    except asyncio.TimeoutError:
+                        break
+                    try:
+                        data = json.loads(raw)
+                    except ValueError:
+                        continue
+
                 x = float(
                     data.get(
                         "x",
@@ -1066,11 +1169,16 @@ def register_control_routes(
                     )
                 )
 
+                # optional, only used by diagnostic scripts to A/B test the
+                # pure-pivot creep injection (which is skipped for nav2/explore/ros2 sources)
+                source = data.get("source")
+
                 if y > 0 and _forward_motion_block_reason():
-                    motor.stop()
+                    await asyncio.to_thread(motor.stop)
                     continue
 
-                if not motor.drive(x, y):
+                moved = await asyncio.to_thread(motor.drive, x, y, source=source)
+                if not moved:
                     print(
                         "WS DRIVE BLOCKED:",
                         "x=", x,

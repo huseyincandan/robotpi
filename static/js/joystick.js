@@ -10,6 +10,15 @@ const keyDirections = {
 	ArrowRight: [1, 0]
 };
 
+// pointermove can fire much faster than the server can process each drive
+// command (serial write + lidar sample); sending on every raw event floods
+// the websocket and stale commands end up executing late. Cap the actual
+// send rate and let a steady interval carry the latest desired x/y instead.
+const DRIVE_SEND_INTERVAL_MS = 100;
+let desiredDriveX = 0;
+let desiredDriveY = 0;
+let driveSendTimer = null;
+
 function connectDriveSocket() {
 
 	if (
@@ -30,10 +39,21 @@ function connectDriveSocket() {
 
 	driveSocket.onopen = () => {
 		setStatus("Joystick baglandi");
+		if (driveSendTimer) {
+			clearInterval(driveSendTimer);
+		}
+		driveSendTimer = setInterval(
+			transmitDrive,
+			DRIVE_SEND_INTERVAL_MS
+		);
 	};
 
 	driveSocket.onclose = () => {
 		setStatus("Joystick kapandi");
+		if (driveSendTimer) {
+			clearInterval(driveSendTimer);
+			driveSendTimer = null;
+		}
 		setTimeout(
 			connectDriveSocket,
 			1000
@@ -54,6 +74,13 @@ function setStatus(message) {
 
 function sendDrive(x, y) {
 
+	// omega isareti S3'un kendi joystick'iyle (omega=-dx) eslesecek sekilde cevrilir
+	desiredDriveX = -x;
+	desiredDriveY = y;
+}
+
+function transmitDrive() {
+
 	if (
 		!driveSocket
 		|| driveSocket.readyState !== WebSocket.OPEN
@@ -63,9 +90,8 @@ function sendDrive(x, y) {
 
 	driveSocket.send(
 		JSON.stringify({
-			// omega isareti S3'un kendi joystick'iyle (omega=-dx) eslesecek sekilde cevrilir
-			x: -x,
-			y
+			x: desiredDriveX,
+			y: desiredDriveY
 		})
 	);
 }

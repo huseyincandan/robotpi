@@ -124,8 +124,12 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 0.2
     simulate_ahead_time: 1.5
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.2
+    # 2026-08-30: was 1.0/0.2 - more than 2x FollowPath's max_vel_theta (0.45),
+    # making every Spin recovery feel much harsher/faster than normal driving.
+    # Lowered to match normal turn speed; recovery still turns, just no
+    # harder than an ordinary autonomous turn.
+    max_rotational_vel: 0.45
+    min_rotational_vel: 0.15
     rotational_acc_lim: 1.2
 
 local_costmap:

@@ -72,6 +72,12 @@ class MotorService:
         self._stop_event = threading.Event()
         self._recovery_cancel_event = threading.Event()
 
+        # IMU+INA219 artik Pi'de degil, S3'un kendi I2C hattinda (2026-09-06,
+        # motor EMI'sinin Pi I2C'sini kilitlemesi yuzunden) - S3 bu verileri
+        # UART uzerinden "TELEM ..." satiri olarak gonderiyor, burada onbelleklenir.
+        self._telem_lock = threading.Lock()
+        self._telem_data = None
+
         self._open_serial()
         self._handshake()
 
@@ -177,6 +183,49 @@ class MotorService:
 
             if text.startswith("ERR"):
                 print("MOTOR SERIAL ERROR REPLY:", text, flush=True)
+            elif text.startswith("TELEM "):
+                self._parse_telemetry(text)
+
+    def _parse_telemetry(self, text):
+
+        # Beklenen format: "TELEM ax ay az gx gy gz bus_voltage shunt_voltage_mv"
+        # (bkz. MotorEspS3.ino pollTelemetry()) - bozuk/eksik bir satir sessizce
+        # atlanir, bir sonraki TELEM satiri zaten yeni veri getirir.
+        parts = text.split()
+
+        if len(parts) != 9:
+            return
+
+        try:
+            values = [float(p) for p in parts[1:]]
+        except ValueError:
+            return
+
+        with self._telem_lock:
+            self._telem_data = {
+                "accel_x": values[0],
+                "accel_y": values[1],
+                "accel_z": values[2],
+                "gyro_x": values[3],
+                "gyro_y": values[4],
+                "gyro_z": values[5],
+                "bus_voltage": values[6],
+                "shunt_voltage_mv": values[7],
+                "received_at": time.monotonic()
+            }
+
+    def get_telemetry(self, max_age_seconds=1.0):
+
+        with self._telem_lock:
+            data = self._telem_data
+
+        if data is None:
+            raise TimeoutError("ESP telemetrisi henuz alinmadi")
+
+        if time.monotonic() - data["received_at"] > max_age_seconds:
+            raise TimeoutError("ESP telemetrisi bayat (S3 UART baglantisini kontrol et)")
+
+        return data
 
     def _keepalive_loop(self):
 
@@ -258,9 +307,10 @@ class MotorService:
         min_linear += boost
         min_turn += boost * 0.7
 
-        # Sag arka teker patinaj yaptigi icin sag donusler (x>0) ayni yuzdede
-        # sol donuse gore cok daha az torka ulasiyor - taban yuzdeyi yukselt.
-        if x > 0:
+        # Sag arka teker patinaj yaptigi icin sag donusler (x<0, 2026-09-06
+        # fiziksel dogrulamayla teyit edildi) ayni yuzdede sol donuse gore
+        # cok daha az torka ulasiyor - taban yuzdeyi yukselt.
+        if x < 0:
             min_turn += float(MOTOR.get("RIGHT_TURN_EXTRA_MIN_TURN_PERCENT", 0.0))
 
         y = self._clamp_min_effective(y, min_linear)
@@ -329,18 +379,49 @@ class MotorService:
 
         return float(front_cm)
 
-    def _lidar_rear_distance_for_recovery(self):
+    def _lidar_min_over_sectors(self, centers_deg):
 
         sample = self._sample_lidar_signature()
         if not sample:
             return None
 
-        rear_cm = sample["signature"].get(180.0)
-        return None if rear_cm is None else float(rear_cm)
+        signature = sample["signature"]
+        values = [signature[c] for c in centers_deg if signature.get(c) is not None]
+        return min(values) if values else None
 
-    def _recovery_backup_clear(self):
+    def _lidar_wide_front_distance_for_recovery(self):
 
-        rear_cm = self._lidar_rear_distance_for_recovery()
+        # The plain 0-degree front_cm sample only covers a +-15deg cone
+        # (SCAN_SECTOR_DEGREES=30) - there's a real ~60deg gap on each side
+        # between it and the left/right sectors where a diagonal obstacle
+        # (e.g. a table leg at front-left) is invisible to every existing
+        # check even though the raw 360deg scan sees it fine. Widen to the
+        # min across front + both front diagonals for stuck/obstacle checks.
+        wide_cm = self._lidar_min_over_sectors([315.0, 0.0, 45.0])
+        if wide_cm is not None:
+            return wide_cm
+
+        return self._lidar_front_distance_for_recovery()
+
+    def _lidar_rear_distance_for_recovery(self, wide=True):
+
+        # Same diagonal-gap reasoning as the front check above, applied to
+        # the rear: min across back + both rear diagonals, not just 180deg.
+        # Only meaningful for a backup that also turns (sweeps a wider arc) -
+        # a pure straight backup never enters those diagonal cones, so
+        # requiring them clear too can falsely block on an object (e.g. a
+        # couch the robot is already wedged against sideways) that a real
+        # straight retreat would never approach. 2026-08-30 live incident:
+        # wide check read 29cm (blocked) while the true 180deg-only reading
+        # was 123cm+ clear the whole time - confirmed via /lidar/readings.
+        if wide:
+            return self._lidar_min_over_sectors([135.0, 180.0, 225.0])
+
+        return self._lidar_min_over_sectors([180.0])
+
+    def _recovery_backup_clear(self, x=0.0):
+
+        rear_cm = self._lidar_rear_distance_for_recovery(wide=abs(x) > 0)
         if rear_cm is None:
             return False, rear_cm
 
@@ -349,9 +430,9 @@ class MotorService:
         )
         return rear_cm >= minimum_clearance, rear_cm
 
-    def rear_motion_clear(self):
+    def rear_motion_clear(self, x=0.0):
 
-        return self._recovery_backup_clear()
+        return self._recovery_backup_clear(x=x)
 
     def _preferred_recovery_turn_direction(self):
 
@@ -392,23 +473,29 @@ class MotorService:
             map_dir = Path.cwd() / map_dir
         return map_dir
 
-    def is_invisible_obstacle_stuck(self):
+    def is_invisible_obstacle_stuck(self, driving_forward=True):
 
         # Low obstacles (table/couch legs) sit below both the lidar's scan
         # plane and the ultrasonic beam. If neither sensor reports anything
         # close while the IMU says we're stuck, whatever is blocking us is
         # invisible to Nav2's costmap too - it can't route around what it
         # can't see, so this can't be left to Nav2's own BT recovery.
-        ultrasonic_cm = self.last_obstacle_distance
-        lidar_front_cm = self._lidar_front_distance_for_recovery()
+        # There is no rear ultrasonic sensor on this robot, so a
+        # backward-triggered event can only be corroborated by rear lidar.
+        if driving_forward:
+            ultrasonic_cm = self.last_obstacle_distance
+            ultrasonic_clear = (
+                ultrasonic_cm is None
+                or float(ultrasonic_cm) > float(MOTOR.get("INVISIBLE_OBSTACLE_MIN_ULTRASONIC_CM", 30.0))
+            )
+            lidar_cm = self._lidar_wide_front_distance_for_recovery()
+        else:
+            ultrasonic_clear = True
+            lidar_cm = self._lidar_rear_distance_for_recovery()
 
-        ultrasonic_clear = (
-            ultrasonic_cm is None
-            or float(ultrasonic_cm) > float(MOTOR.get("INVISIBLE_OBSTACLE_MIN_ULTRASONIC_CM", 30.0))
-        )
         lidar_clear = (
-            lidar_front_cm is None
-            or float(lidar_front_cm) > float(MOTOR.get("INVISIBLE_OBSTACLE_MIN_LIDAR_FRONT_CM", 45.0))
+            lidar_cm is None
+            or float(lidar_cm) > float(MOTOR.get("INVISIBLE_OBSTACLE_MIN_LIDAR_FRONT_CM", 45.0))
         )
         return ultrasonic_clear and lidar_clear
 
@@ -440,7 +527,7 @@ class MotorService:
         except OSError:
             pass
 
-    def mark_virtual_obstacle(self, reason):
+    def mark_virtual_obstacle(self, reason, driving_forward=True):
 
         pose = self._read_current_map_pose()
         if pose is None:
@@ -449,8 +536,9 @@ class MotorService:
         x, y, yaw = pose
         # The robot's own footprint center isn't quite where an invisible low
         # obstacle caught it - it's a bit further along whichever way it was
-        # heading when it got stuck.
-        offset_m = 0.12
+        # heading when it got stuck. If it got stuck backing up, that's
+        # behind the robot (opposite of yaw heading), not ahead of it.
+        offset_m = 0.12 if driving_forward else -0.12
         obstacle_x = x + offset_m * math.cos(yaw)
         obstacle_y = y + offset_m * math.sin(yaw)
 
@@ -463,6 +551,19 @@ class MotorService:
 
         dedupe_radius_m = float(MAP.get("ROS2_VIRTUAL_OBSTACLES_DEDUPE_RADIUS_M", 0.20))
         now = time.time()
+
+        max_age_seconds = float(MAP.get("ROS2_VIRTUAL_OBSTACLES_MAX_AGE_SECONDS", 900.0))
+        if max_age_seconds > 0:
+            fresh_entries = []
+            expired_count = 0
+            for entry in entries:
+                if isinstance(entry, dict) and now - float(entry.get("updated_at", now)) > max_age_seconds:
+                    expired_count += 1
+                    continue
+                fresh_entries.append(entry)
+            if expired_count:
+                print(f"VIRTUAL OBSTACLES EXPIRED: dropped {expired_count} stale entr{'y' if expired_count == 1 else 'ies'}", flush=True)
+            entries = fresh_entries
 
         for entry in entries:
             if not isinstance(entry, dict):
@@ -673,6 +774,17 @@ class MotorService:
         self.last_requested_x = 0
         self.last_requested_y = 0
 
+    def enable_firmware_test_mode(self, timeout_ms=2000, duration_s=30):
+        # TEMP DIAGNOSTIC (2026-08-31): firmware's PI_CMD_TIMEOUT_MS (250ms)
+        # auto-stop is suspected of causing choppy pivots when a resend is a
+        # bit late - this temporarily widens that window on the S3 itself
+        # (requires the matching TESTMODE firmware change to be flashed).
+        # Firmware caps both values and auto-reverts, so this can't run away.
+        return self._send_line(f"TESTMODE {int(timeout_ms)} {int(duration_s)}")
+
+    def disable_firmware_test_mode(self):
+        return self._send_line("TESTMODE_OFF")
+
     def stop(self):
 
         self._recovery_cancel_event.set()
@@ -731,6 +843,18 @@ class MotorService:
 
         self.last_requested_x = x
         self.last_requested_y = y
+
+        # 2026-08-31: saf yerinde pivot (y=0, x!=0) manuel/joystick kaynaklarda
+        # guvenilmez (bazen ~0 derece donus) - nav2'nin kendi min_vel_x kacis
+        # yontemini taklit ederek kucuk bir ileri kayma ekle. nav2/explore/ros2
+        # kaynaklarina dokunma, cunku nav2'nin kendi Spin recovery'si tam
+        # yerinde donus bekliyor.
+        if (
+            abs(float(x)) > 0
+            and abs(float(y)) < 1e-6
+            and self.last_drive_source not in {"nav2", "explore", "ros2"}
+        ):
+            y = float(MOTOR.get("PURE_PIVOT_FORWARD_CREEP_PERCENT", 12.0))
 
         x, y = self._apply_minimum_effective_command(x, y)
 
@@ -1462,14 +1586,16 @@ class MotorService:
     def _detect_stall_reason(self, driving_forward, stuck_event):
 
         # Single priority-ordered check: IMU stuck event > lidar motion
-        # stall > forward-block timeout. IMU stuck detection only runs while
-        # driving forward (see safety_loop), but lidar-motion verification
-        # tracks every drive() call regardless of direction - a pure in-place
+        # stall > forward-block timeout. IMU stuck detection now runs while
+        # driving forward OR backward (see safety_loop) - stuck_event is
+        # only ever non-None when one of those actually fired, so no need
+        # to re-gate on direction here. Lidar-motion verification tracks
+        # every drive() call regardless of direction - a pure in-place
         # pivot (y=0) that fails to actually rotate the robot (scrub friction
         # against a nearby obstacle) is just as real a stall as a blocked
         # forward push, so it must be checked here too, not gated behind
         # driving_forward.
-        if driving_forward and stuck_event:
+        if stuck_event:
             return "imu"
 
         if self.is_lidar_motion_stalled():
@@ -1517,6 +1643,7 @@ class MotorService:
                 continue
 
             driving_forward = self.current_y > 0
+            driving_backward = self.current_y < 0
             stuck_event = None
 
             if driving_forward:
@@ -1531,6 +1658,47 @@ class MotorService:
 
                 if stuck_event:
                     self.stop_for_imu_stuck()
+
+            elif driving_backward:
+                # Backward driving had NO continuous safety net at all: no
+                # equivalent of forward's ultrasonic re-check baked into
+                # drive()/safe_forward_speed(), and IMU impact detection was
+                # entirely gated off for y<0 (see services/imu.py). A real
+                # impact while backing into something invisible to lidar and
+                # ultrasonic (e.g. a low table leg) went fully undetected -
+                # the only protection was a single rear_motion_clear() check
+                # done once per incoming /drive call, which can be stale for
+                # the whole span of that pulse. Mirror forward's continuous
+                # check here: re-verify rear clearance and IMU impact every
+                # tick (50ms). Deliberately does NOT call self.drive() again
+                # (would extend a manual pulse's lifetime past what the
+                # caller intended, unlike forward where re-driving is the
+                # only thing keeping a caller-refreshed command alive) and
+                # deliberately does NOT auto-launch recover_from_stuck()
+                # (recover_once() always backs up FIRST - doing that here
+                # would drive straight back into whatever was just hit).
+                rear_clear, rear_cm = self.rear_motion_clear(x=self.current_x)
+                if not rear_clear:
+                    self.stop()
+                    self.blocked = True
+                    self.last_block_reason = "rear_obstacle"
+                    print(
+                        "REAR SAFETY STOP (continuous):",
+                        "unknown" if rear_cm is None else f"{rear_cm:.1f} cm",
+                        flush=True
+                    )
+                else:
+                    backward_stuck_event = await asyncio.to_thread(
+                        self.read_imu_stuck_event
+                    )
+
+                    if backward_stuck_event:
+                        self.stop_for_imu_stuck()
+                        if self.is_invisible_obstacle_stuck(driving_forward=False):
+                            self.mark_virtual_obstacle(
+                                "imu_stuck_invisible_rear",
+                                driving_forward=False
+                            )
 
             stall_reason = self._detect_stall_reason(driving_forward, stuck_event)
 

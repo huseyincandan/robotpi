@@ -41,4 +41,11 @@
     orientation_scale: 0.0
     gain_scale: 2.5
     transform_tolerance: 0.3
-    min_frontier_size: 0.45
+    # 2026-09-05: robot bir temizlik robotu degil - kullanici evin her kose/
+    # bucagina/dip detayina girmesini istemiyor, genel bir gezinme + harita
+    # cikarma yeterli. 0.45 hala kose/dar aralik kalintilarini (kucuk
+    # frontier'lari) hedef olarak birakiyordu. Yukseltilince explore_lite
+    # bu kucuk/dar frontier'lari tamamen eleyip sadece genis, acik alanlari
+    # hedefler - kalan frontier'lar hep kucukse (yani sadece kose/dip detay
+    # kaldiysa) explore_lite kendiliginden durur, bu istenen davranis.
+    min_frontier_size: 0.9

@@ -86,7 +86,13 @@ MOTOR = {
     # Sag arka tekerin daha zayif kaldigi yonu kucuk ve surekli bir taban tork
     # farkiyla telafi et. Darbeli kick SLAM yaw sicramalarina neden oldugu icin
     # tamamen kaldirildi.
-    "RIGHT_TURN_EXTRA_MIN_TURN_PERCENT": 4.0
+    "RIGHT_TURN_EXTRA_MIN_TURN_PERCENT": 4.0,
+    # 2026-08-31: saf yerinde pivot (y=0, x!=0) manuel/joystick kullaniminda
+    # guvenilmez bulundu (bazen ~0 derece donus) - nav2'nin kendi
+    # FollowPath.min_vel_x=0.04 kacis yontemini taklit ederek, saf pivot
+    # istendiginde kucuk bir ileri kayma enjekte ediyoruz (sadece nav2/explore
+    # disi kaynaklar icin - nav2'nin kendi Spin recovery'si bundan etkilenmemeli).
+    "PURE_PIVOT_FORWARD_CREEP_PERCENT": 30.0
 }
 
 LIDAR = {
@@ -112,10 +118,16 @@ LIDAR = {
 }
 
 POWER_MONITOR = {
-    "ENABLED": False,
+    "ENABLED": True,
+    # 2026-09-06: INA219 artik Pi'nin I2C hattinda degil, ESP32-S3'un kendi
+    # I2C hattinda (SDA=41, SCL=42) - BUS/ADDRESS artik kullanilmiyor (sadece
+    # donanim tekrar Pi'ye baglanirsa diye Ina219Service'de saklaniyor).
+    # Veriler S3'ten UART "TELEM" satirlari ile gelir (bkz. EspPowerBridge).
     "BUS": 1,
     "ADDRESS": 0x40,
     "SHUNT_OHMS": 0.1,
+    # S3'ten bu sureden daha eski TELEM verisi "okuma hatasi" (TimeoutError) sayilir.
+    "ESP_TELEM_MAX_AGE_SECONDS": 1.0,
     "MIN_VOLTAGE": 9.9,
     "MAX_VOLTAGE": 12.6,
     "LOW_VOLTAGE_WARNING": 10.5,
@@ -130,15 +142,37 @@ POWER_MONITOR = {
 
 IMU = {
     "ENABLED": True,
+    # 2026-09-06: MPU6050 artik Pi'nin I2C hattinda degil, ESP32-S3'un kendi
+    # I2C hattinda (SDA=41, SCL=42) - BUS/ADDRESS artik kullanilmiyor (sadece
+    # donanim tekrar Pi'ye baglanirsa diye Mpu6050Service'de saklaniyor).
+    # Veriler S3'ten UART "TELEM" satirlari ile gelir (bkz. EspImuBridge).
     "BUS": 1,
     "ADDRESS": 0x68,
+    # S3'ten bu sureden daha eski TELEM verisi "okuma hatasi" (TimeoutError) sayilir.
+    "ESP_TELEM_MAX_AGE_SECONDS": 1.0,
     # Acilista ve /imu/calibrate cagrisinda robot sabitken gyro sapmasini
     # (bias) olcup sonraki okumalardan cikarmak icin kullanilir; aksi halde
     # odom yaw robot tamamen dururken bile surekli driftler.
     "GYRO_BIAS_CALIBRATION_SAMPLES": 60,
     "GYRO_BIAS_CALIBRATION_INTERVAL_SECONDS": 0.02,
     "TILT_ACCEL_G": 1.15,
-    "IMPACT_ACCEL_DELTA_G": 0.45,
+    # Was 0.45 - live-captured a false-positive IMU-stuck trip during an
+    # entirely benign small controlled forward move (accel_delta=0.58,
+    # horizontal_accel=0.03 so clearly not a tilt/impact, just ordinary
+    # drive/stop vibration). Raised with margin above that observed value;
+    # re-verify against a real impact if this ever misses a genuine hit.
+    "IMPACT_ACCEL_DELTA_G": 0.70,
+    # 2026-09-07: threshold above STILL false-tripped (accel_delta=0.92,
+    # horizontal_accel=0.06, gyro_total=14.3 - user confirmed no obstacle in
+    # front) during a benign stop->forward transition. Raising the threshold
+    # again would just repeat the same whack-a-mole - the real cause is the
+    # chassis jolt at the exact moment the wheels break static friction, not
+    # an ongoing signal level. Added IMPACT_STARTUP_GRACE_SECONDS instead:
+    # suppresses ONLY the "impact" reason for this short window right after a
+    # stop->drive transition, tilt/rotation detection stay fully active the
+    # whole time so a genuine impact right at motion start still trips via
+    # those. See services/imu.py detect_stuck().
+    "IMPACT_STARTUP_GRACE_SECONDS": 0.6,
     "UNEXPECTED_GYRO_DPS": 260,
     "STUCK_COOLDOWN_SECONDS": 1.5,
     # Motor PWM gurultusuyle olusan tekil I2C glitch'leri read_motion() bu kadar
@@ -245,6 +279,13 @@ MAP = {
     # obstacle (refreshes its timestamp instead of growing the file forever).
     "ROS2_VIRTUAL_OBSTACLES_DEDUPE_RADIUS_M": 0.20,
     "ROS2_VIRTUAL_OBSTACLES_MAX_ENTRIES": 200,
+    # Entries not reconfirmed (re-hit) within this long are dropped on the next
+    # mark_virtual_obstacle() call - guards against slow/gradual SLAM pose
+    # drift (too gradual to trip the pose-jump watchdog's full map reset)
+    # eventually making an old mark's map-frame coordinates meaningless.
+    # A genuinely real obstacle keeps getting re-hit, which refreshes
+    # updated_at and resets this clock, so it never actually expires.
+    "ROS2_VIRTUAL_OBSTACLES_MAX_AGE_SECONDS": 900.0,
     # A single IMU stuck event can be a false positive (e.g. a momentary
     # sensor-reading gap during a real, visible wedge). Require the SAME spot
     # to be hit this many times before it's actually published into Nav2's
@@ -312,11 +353,15 @@ MAP = {
     # debug/consistency only.
     "ROS2_ODOM_VX_VARIANCE": 0.01,
     "ROS2_ODOM_VYAW_VARIANCE": 0.05,
-    "ROS2_NAV2_MAX_LINEAR_X": 0.192,
-    "ROS2_NAV2_MAX_ANGULAR_Z": 0.45,
-    "ROS2_NAV2_MAX_DRIVE_PERCENT": 30.4,
-    "ROS2_NAV2_MAX_TURN_PERCENT": 58.0,
-    "ROS2_NAV2_TURN_HOLD_PERCENT": 58.0,
+    # 2026-09-06: kullanici manevralarin (ozellikle donuslerin) cok hizli/
+    # sert oldugunu bildirdi - kurtarma manevrasi (MOTOR.RECOVERY_*) ayri bir
+    # config oldugu icin bundan etkilenmez, sadece nav2/explore'un normal
+    # surusu ~%25 yavaslatildi.
+    "ROS2_NAV2_MAX_LINEAR_X": 0.144,
+    "ROS2_NAV2_MAX_ANGULAR_Z": 0.34,
+    "ROS2_NAV2_MAX_DRIVE_PERCENT": 22.8,
+    "ROS2_NAV2_MAX_TURN_PERCENT": 43.5,
+    "ROS2_NAV2_TURN_HOLD_PERCENT": 43.5,
     "ROS2_NAV2_TURN_BREAKAWAY_SECONDS": 0.20,
     "ROS2_NAV2_ANGULAR_SLEW_RATE": 0.45,
     "ROS2_NAV2_MIN_LINEAR_SCALE_AT_MAX_TURN": 0.25,
@@ -364,7 +409,23 @@ MAP = {
     "MAP_IMU_YAW_WATCHDOG_ENABLED": True,
     "MAP_IMU_YAW_MAX_ERROR_DEG": 40.0,
     "MAP_IMU_YAW_DISTURBANCE_DELTA_DEG": 8.0,
-    "MAP_IMU_YAW_DISTURBANCE_GRACE_SECONDS": 3.0
+    "MAP_IMU_YAW_DISTURBANCE_GRACE_SECONDS": 3.0,
+    # 2026-09-05: guc/I2C glitch (bkz. repo notlari) sirasinda lidar'in
+    # USB-seri baglantisi donup /scan yayinini tamamen durdurabiliyor, ve
+    # kendi kendine toparlanmiyor (glitch bitmesine ragmen dakikalarca
+    # lidar_status="error" kaliyor). Bu watchdog bu durumu tespit edip
+    # sadece lidar/SLAM surecini (map/reset ile ayni islem) yeniden baslatir
+    # - tum uygulamayi yeniden baslatmaktan cok daha hafif bir mudahale.
+    "LIDAR_FREEZE_WATCHDOG_ENABLED": True,
+    "LIDAR_FREEZE_CHECK_INTERVAL_SECONDS": 3.0,
+    "LIDAR_FREEZE_MAX_ERROR_SECONDS": 10.0,
+    "LIDAR_FREEZE_RESET_COOLDOWN_SECONDS": 60.0,
+    # 2026-09-05: robot bir temizlik robotu degil, genel gezinme yapacak -
+    # explore_lite ilk frontier hedefini gondermeden once SLAM'in birkac
+    # scan-match dongusu tamamlayip ilk yerel haritayi olusturmasina zaman
+    # tanimak icin kisa bir bekleme (robot bu surede zaten hareketsiz,
+    # nav2 costmap hazir olduktan hemen sonra).
+    "EXPLORE_STARTUP_SETTLE_SECONDS": 4.0
 }
 
 LOGGING = {

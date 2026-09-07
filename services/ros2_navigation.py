@@ -641,6 +641,14 @@ class Ros2NavigationService:
                 "message": "global_costmap not ready before explore_lite launch"
             }
 
+        # Give slam_toolbox a few scan-match cycles against the (mostly
+        # stationary) robot before explore_lite starts chasing frontiers, so
+        # the first goal is picked from an already-reasonable local map
+        # instead of a near-empty one.
+        settle_seconds = float(MAP.get("EXPLORE_STARTUP_SETTLE_SECONDS", 0.0))
+        if settle_seconds > 0:
+            time.sleep(settle_seconds)
+
         # explore_lite's launch file does not expose a params_file argument. Run the
         # node directly so frontier discovery uses our tuned raw SLAM map settings;
         # Nav2 still validates and executes goals against its inflated costmaps.

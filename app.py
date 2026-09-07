@@ -82,15 +82,16 @@ from services.audio import (
 )
 
 from services.distance import (
-    DistanceService
+    DistanceService,
+    keep_samples_warm_loop
 )
 
 from services.imu import (
-    Mpu6050Service
+    EspImuBridge
 )
 
 from services.power import (
-    Ina219Service
+    EspPowerBridge
 )
 
 from services.music import (
@@ -149,6 +150,9 @@ class NullMotorService:
         self.current_x = 0.0
         self.current_y = 0.0
 
+    def get_telemetry(self, max_age_seconds=1.0):
+        raise TimeoutError("motor servisi kapali, ESP telemetrisi yok")
+
     async def safety_loop(self):
         while True:
             await asyncio.sleep(1.0)
@@ -169,20 +173,13 @@ app.mount(
 )
 
 distance = _try_init_service(DistanceService, "DISTANCE")
-imu = _try_init_service(Mpu6050Service, "IMU")
-
-if bool(POWER_MONITOR.get("ENABLED", True)):
-    power_monitor = _try_init_service(Ina219Service, "POWER MONITOR")
-else:
-    power_monitor = None
-    print("POWER MONITOR DISABLED BY CONFIG", flush=True)
 
 speech = SpeechService()
 
 try:
     motor = MotorService(
         distance=distance,
-        imu=imu,
+        imu=None,
         speech=speech
     )
     print("MOTOR SERVICE READY", flush=True)
@@ -193,6 +190,18 @@ except Exception as exc:
         repr(exc),
         flush=True
     )
+
+# IMU+INA219 artik Pi'nin kendi I2C hattinda degil, S3'un I2C hattinda
+# (2026-09-06: motor EMI'si Pi I2C'sini kilitliyordu) - ikisi de motor
+# uzerinden gelen UART telemetrisinden okunur, bu yuzden motor'dan sonra kurulur.
+imu = _try_init_service(lambda: EspImuBridge(motor), "IMU")
+motor.imu = imu
+
+if bool(POWER_MONITOR.get("ENABLED", True)):
+    power_monitor = _try_init_service(lambda: EspPowerBridge(motor), "POWER MONITOR")
+else:
+    power_monitor = None
+    print("POWER MONITOR DISABLED BY CONFIG", flush=True)
 
 music = MusicService()
 mapping_provider = str(MAP.get("PROVIDER", "ros2")).lower()
@@ -419,6 +428,11 @@ async def start_wake_listener():
             motor.safety_loop()
         )
 
+    if distance:
+        distance_warmup_task = asyncio.create_task(
+            keep_samples_warm_loop(distance)
+        )
+
     if lidar and movement and bool(LIDAR.get("AUTO_CALIBRATE_ON_STARTUP", False)):
         startup_calibration_task = asyncio.create_task(
             _run_startup_lidar_calibration()
@@ -427,6 +441,11 @@ async def start_wake_listener():
     if mapping and bool(MAP.get("MAP_JUMP_WATCHDOG_ENABLED", True)):
         map_jump_watchdog_task = asyncio.create_task(
             _run_map_jump_watchdog()
+        )
+
+    if mapping and lidar and bool(MAP.get("LIDAR_FREEZE_WATCHDOG_ENABLED", True)):
+        lidar_freeze_watchdog_task = asyncio.create_task(
+            _run_lidar_freeze_watchdog()
         )
 
     if (
@@ -465,10 +484,19 @@ async def _run_exploration_liveness_watchdog():
         await asyncio.sleep(1.0)
 
         state = navigator.status()
-        no_frontiers = (
+        explore_reason = state.get("explore_reason")
+        # 2026-08-30: was gated on explore_reason=="no_frontiers" only, so a
+        # wedged robot with an ACTIVE goal (nav2 still replanning, but
+        # collision_monitor silently zeroing every cmd_vel - see corner-stuck
+        # incident) never tripped this watchdog at all, since explore_reason
+        # stayed "goal_active" the whole time it sat frozen. goal_active is
+        # the normal 99%-of-time state during exploration too, so this relies
+        # entirely on the "stationary for idle_seconds" timer below to avoid
+        # false-triggering on ordinary brief replanning pauses.
+        supervised = (
             bool(state.get("nav2_running"))
             and bool(state.get("explore_process_running"))
-            and state.get("explore_reason") == "no_frontiers"
+            and explore_reason in ("no_frontiers", "goal_active")
             and bool(state.get("autonomous_recovery_allowed"))
         )
         stationary = (
@@ -477,7 +505,7 @@ async def _run_exploration_liveness_watchdog():
             and not bool(getattr(motor, "recovering", False))
         )
 
-        if not no_frontiers or not stationary:
+        if not supervised or not stationary:
             idle_since = None
             continue
 
@@ -491,17 +519,21 @@ async def _run_exploration_liveness_watchdog():
 
         front_blocked = await asyncio.to_thread(motor.is_forward_blocked)
         if not front_blocked:
-            print(
-                "EXPLORE COMPLETE: no frontiers and forward path is clear",
-                flush=True
-            )
+            if explore_reason == "no_frontiers":
+                print(
+                    "EXPLORE COMPLETE: no frontiers and forward path is clear",
+                    flush=True
+                )
             idle_since = None
             continue
 
         last_recovery_at = now
         idle_since = None
         print(
-            "EXPLORE IDLE RECOVERY: no frontiers while forward path is blocked",
+            "EXPLORE IDLE RECOVERY:",
+            "no frontiers" if explore_reason == "no_frontiers"
+            else "goal active but stationary (nav2 stuck, e.g. wedged corner)",
+            "while forward path is blocked",
             flush=True
         )
 
@@ -634,8 +666,15 @@ async def _run_map_jump_watchdog():
     while True:
         await asyncio.sleep(max(0.5, interval))
 
+        recovery_finished_at = getattr(motor, "last_recovery_finished_at", None)
+        recovery_settling = recovery_finished_at is not None and (
+            time.monotonic() - float(recovery_finished_at)
+            < float(MAP.get("MAP_IMU_YAW_DISTURBANCE_GRACE_SECONDS", 3.0))
+        )
+        recovering = bool(getattr(motor, "recovering", False)) or recovery_settling
+
         try:
-            jump = mapping.detect_pose_jump()
+            jump = mapping.detect_pose_jump(robot_moving=not recovering)    
         except Exception as exc:
             print("MAP JUMP WATCHDOG CHECK ERROR:", repr(exc), flush=True)
             continue
@@ -643,14 +682,8 @@ async def _run_map_jump_watchdog():
         if not jump and bool(MAP.get("MAP_IMU_YAW_WATCHDOG_ENABLED", True)) and imu:
             try:
                 sample = await asyncio.to_thread(imu.read_motion)
-                recovery_finished_at = getattr(motor, "last_recovery_finished_at", None)
-                recovery_settling = recovery_finished_at is not None and (
-                    time.monotonic() - float(recovery_finished_at)
-                    < float(MAP.get("MAP_IMU_YAW_DISTURBANCE_GRACE_SECONDS", 3.0))
-                )
                 robot_moving = (
-                    not bool(getattr(motor, "recovering", False))
-                    and not recovery_settling
+                    not recovering
                     and (
                         abs(float(getattr(motor, "current_x", 0.0))) >= 0.5
                         or abs(float(getattr(motor, "current_y", 0.0))) >= 0.5
@@ -686,6 +719,66 @@ async def _run_map_jump_watchdog():
             print("MAP JUMP WATCHDOG: mapping.reset failed:", repr(exc), flush=True)
 
         print("MAP JUMP WATCHDOG: exploration remains stopped after reset", flush=True)
+
+
+async def _run_lidar_freeze_watchdog():
+
+    interval = float(MAP.get("LIDAR_FREEZE_CHECK_INTERVAL_SECONDS", 3.0))
+    max_error_seconds = float(MAP.get("LIDAR_FREEZE_MAX_ERROR_SECONDS", 10.0))
+    cooldown_seconds = float(MAP.get("LIDAR_FREEZE_RESET_COOLDOWN_SECONDS", 60.0))
+
+    error_since = None
+    last_reset_at = 0.0
+
+    while True:
+        await asyncio.sleep(max(0.5, interval))
+
+        try:
+            is_ready = bool(lidar.is_ready())
+        except Exception as exc:
+            print("LIDAR FREEZE WATCHDOG CHECK ERROR:", repr(exc), flush=True)
+            continue
+
+        if is_ready:
+            error_since = None
+            continue
+
+        if error_since is None:
+            error_since = time.monotonic()
+            continue
+
+        if time.monotonic() - error_since < max_error_seconds:
+            continue
+
+        if time.monotonic() - last_reset_at < cooldown_seconds:
+            continue
+
+        print(
+            "LIDAR FREEZE DETECTED, AUTO-RESTARTING LIDAR/SLAM STACK:",
+            "status=", lidar.status(),
+            "stuck_for_s=", round(time.monotonic() - error_since, 1),
+            flush=True
+        )
+
+        if navigator:
+            try:
+                navigator.stop_exploration()
+            except Exception as exc:
+                print("LIDAR FREEZE WATCHDOG: stop_exploration failed:", repr(exc), flush=True)
+
+        try:
+            motor.stop()
+        except Exception as exc:
+            print("LIDAR FREEZE WATCHDOG: motor stop failed:", repr(exc), flush=True)
+
+        try:
+            result = mapping.reset()
+            print("LIDAR FREEZE WATCHDOG: auto reset result:", result, flush=True)
+        except Exception as exc:
+            print("LIDAR FREEZE WATCHDOG: mapping.reset failed:", repr(exc), flush=True)
+
+        last_reset_at = time.monotonic()
+        error_since = None
 
 
 async def _run_startup_lidar_calibration():

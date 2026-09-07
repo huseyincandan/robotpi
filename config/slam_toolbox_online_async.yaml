@@ -21,6 +21,12 @@ slam_toolbox:
     # 2026-08-22: raised from 0.04 - user reported the web map looked low-res;
     # finer grid cells show more real wall/room detail per pixel.
     resolution: 0.025
+    # 2026-09-05: do_loop_closing re-enable (2026-08-30) was only idle-tested;
+    # during real motion it produced two large scan-match jumps this session
+    # (yaw_delta_deg 126 and 176 in ~1s, both auto-caught by the MAP JUMP
+    # WATCHDOG - see app.py/services/ros2_slam.py detect_pose_jump) causing
+    # the robot to appear to "spin wildly then freeze" and the map to keep
+    # getting reset. Reverting per the documented rollback condition.
     restamp_tf: false
     min_laser_range: 0.0
     max_laser_range: 8.0
@@ -42,18 +48,36 @@ slam_toolbox:
     scan_buffer_maximum_scan_distance: 10.0
     link_match_minimum_response_fine: 0.1
     link_scan_maximum_distance: 1.5
-    loop_search_maximum_distance: 3.0
-    # 2026-08-22: temporarily disabled for diagnostics - /map/pose was observed
+    # 2026-08-30: was 3.0 - re-enabling loop closing (see below) in a small/
+    # feature-poor room needs a tighter search radius to cut down on
+    # spurious revisit matches against an unrelated, similar-looking corner.
+    loop_search_maximum_distance: 1.5
+    # 2026-08-22: was disabled for diagnostics - /map/pose was observed
     # jumping/drifting (up to ~0.9m, tens of degrees) over tens of seconds while
     # the robot was fully idle (no drive commands), and the exported map showed
     # disjoint scan streaks instead of solid walls, consistent with spurious
-    # loop-closure corrections against a small/feature-poor map. Revert to true
-    # once confirmed as the cause (or if turning it off doesn't fix it).
+    # loop-closure corrections against a small/feature-poor map.
+    # 2026-08-30: re-enabled, paired with a tighter loop_search_maximum_distance
+    # and higher loop_match_minimum_response_coarse/fine below, to reduce the
+    # false-positive-match risk instead of leaving the correction mechanism
+    # off entirely. Only idle-tested at the time (100s stationary, zero
+    # jumps) - explicitly flagged as needing a live in-motion validation
+    # before trusting it during real exploration.
+    # 2026-09-05: REVERTED to false - the in-motion validation failed. Two
+    # separate live wander/explore runs each produced one large scan-match
+    # jump (yaw_delta_deg 126.5 and 176.2, both within ~1s), both caught by
+    # the MAP JUMP WATCHDOG (auto SLAM reset + exploration stop). This is
+    # exactly the rollback condition documented above, and matches the
+    # user-reported symptom (robot appears to spin/jerk then suddenly stop,
+    # map looks weak/wrong) - the jump is a bad loop-closure correction in
+    # the SLAM pose, not an actual physical motor spin.
     do_loop_closing: false
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
-    loop_match_minimum_response_coarse: 0.35
-    loop_match_minimum_response_fine: 0.45
+    # 2026-08-30: was 0.35/0.45 - raised both to require stronger match
+    # confidence before accepting a loop closure (see do_loop_closing above).
+    loop_match_minimum_response_coarse: 0.45
+    loop_match_minimum_response_fine: 0.55
 
     correlation_search_space_dimension: 0.5
     correlation_search_space_resolution: 0.01

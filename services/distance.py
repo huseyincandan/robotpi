@@ -145,3 +145,30 @@ async def log_distance_loop(distance):
         await asyncio.sleep(
             ULTRASONIC["LOG_INTERVAL_SECONDS"]
         )
+
+
+async def keep_samples_warm_loop(distance):
+
+    # read_safety_centimeters() only trusts a confirmed cluster (>=3 samples
+    # within CLUSTER_MAX_SPREAD_CM out of the last FILTER_WINDOW_SIZE), but
+    # the sample deque was previously only fed while a forward drive check
+    # was actively running - so every forward command after any idle gap
+    # started from a cold/stale buffer and had to burn through a few
+    # "ultrasonic_unstable" blocks before it (re)confirmed a cluster. Sample
+    # continuously in the background instead, so a confirmed cluster is
+    # already present the instant a real forward check needs it.
+    interval_seconds = float(
+        ULTRASONIC.get("SAFETY_CHECK_INTERVAL_SECONDS", 0.05)
+    )
+
+    while True:
+        try:
+            await asyncio.to_thread(distance.read_centimeters)
+        except Exception as exc:
+            print(
+                "DISTANCE WARM-UP ERROR:",
+                repr(exc),
+                flush=True
+            )
+
+        await asyncio.sleep(interval_seconds)

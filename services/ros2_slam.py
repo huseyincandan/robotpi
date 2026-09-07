@@ -335,7 +335,7 @@ class Ros2SlamService:
 
         return f"stopped({code})"
 
-    def detect_pose_jump(self):
+    def detect_pose_jump(self, robot_moving=True):
 
         try:
             payload = json.loads(self.pose_file.read_text(encoding="utf-8"))
@@ -358,7 +358,9 @@ class Ros2SlamService:
         previous = self._last_jump_check_pose
         self._last_jump_check_pose = (x, y, yaw, updated_at)
 
-        if previous is None:
+        # keep the baseline pose fresh but skip the jump check itself during our
+        # own recovery turns, which are legitimately fast and not a SLAM glitch
+        if previous is None or not robot_moving:
             return None
 
         prev_x, prev_y, prev_yaw, prev_updated_at = previous
