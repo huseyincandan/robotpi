@@ -161,17 +161,25 @@ IMU = {
     # horizontal_accel=0.03 so clearly not a tilt/impact, just ordinary
     # drive/stop vibration). Raised with margin above that observed value;
     # re-verify against a real impact if this ever misses a genuine hit.
-    "IMPACT_ACCEL_DELTA_G": 0.70,
-    # 2026-09-07: threshold above STILL false-tripped (accel_delta=0.92,
-    # horizontal_accel=0.06, gyro_total=14.3 - user confirmed no obstacle in
-    # front) during a benign stop->forward transition. Raising the threshold
-    # again would just repeat the same whack-a-mole - the real cause is the
-    # chassis jolt at the exact moment the wheels break static friction, not
-    # an ongoing signal level. Added IMPACT_STARTUP_GRACE_SECONDS instead:
-    # suppresses ONLY the "impact" reason for this short window right after a
-    # stop->drive transition, tilt/rotation detection stay fully active the
-    # whole time so a genuine impact right at motion start still trips via
-    # those. See services/imu.py detect_stuck().
+    # 2026-09-07: was 0.70, still false-tripped repeatedly during ordinary
+    # controlled driving (observed benign values: 0.58, 0.72, 0.77, 0.80,
+    # 0.88, 0.90, 0.92 - all confirmed no real obstacle/collision). Added
+    # IMPACT_STARTUP_GRACE_SECONDS (see below) to rule out the "start of
+    # motion" jolt specifically, but false trips kept happening even mid-burst
+    # and once during ordinary nav2-commanded turning (gyro_total=76 legitimately
+    # elevated from a real turn, not impact) - so requiring gyro/tilt
+    # corroboration doesn't work either, since real turning also elevates
+    # gyro. This chassis's ordinary driving vibration alone regularly produces
+    # accel_delta up to ~0.9g - raised with real margin above the highest
+    # confirmed-benign observation (0.92) so ordinary driving stops tripping
+    # this. If this ever misses a genuine impact, re-verify against a real
+    # hit before lowering again.
+    "IMPACT_ACCEL_DELTA_G": 1.15,
+    # Suppresses ONLY the "impact" reason for this short window right after a
+    # stop->drive transition (the single moment most likely to be a pure
+    # mechanical jolt, not a real hit) - tilt/rotation stay fully active the
+    # whole time. Kept as a secondary safeguard alongside the higher
+    # threshold above; see services/imu.py detect_stuck().
     "IMPACT_STARTUP_GRACE_SECONDS": 0.6,
     "UNEXPECTED_GYRO_DPS": 260,
     "STUCK_COOLDOWN_SECONDS": 1.5,
