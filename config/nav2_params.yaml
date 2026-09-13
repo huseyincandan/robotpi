@@ -109,8 +109,22 @@ controller_server:
       RotateToGoal.scale: 3.0
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0
-      PathAlign.scale: 32.0
-      GoalAlign.scale: 24.0
+      # 2026-09-14: even after softening RotateToGoal and adding SmoothPath,
+      # live /drive logs during a corridor run showed sustained near-max-clamp
+      # turn commands (x around -30 to -36%) with only weak forward creep
+      # (y around 5-20%) for many consecutive cycles - the robot was mostly
+      # rotating in place (yaw wrapping repeatedly through +-pi) rather than
+      # translating, even though the path was smoothed and RotateToGoal was
+      # already low. Root cause: PathAlign/GoalAlign were raised to 32/24 in
+      # an earlier session specifically to win against RotateToGoal, but they
+      # penalize heading misalignment just as steeply as a pivot-favoring
+      # critic once explore_lite's headless goals create a large path/goal
+      # heading error - so they were reproducing the same "turn before you
+      # translate" behavior under a different critic. Halved both so
+      # PathDist/GoalDist (progress-toward-goal, left at DWB defaults ~32/24)
+      # can compete evenly instead of alignment dominating every cycle.
+      PathAlign.scale: 12.0
+      GoalAlign.scale: 10.0
       BaseObstacle.scale: 0.10
 
 planner_server:
@@ -123,6 +137,22 @@ planner_server:
       tolerance: 0.5
       use_astar: false
       allow_unknown: true
+
+smoother_server:
+  ros__parameters:
+    use_sim_time: false
+    smoother_plugins: ["SimpleSmoother"]
+    # 2026-09-13: the raw NavFn grid path (0.05m cells) was being handed
+    # straight to FollowPath with no smoothing at all - PathAlign then closely
+    # tracks every small grid-stairstep in that path, which looks like
+    # excessive side-to-side reorientation over what should be a straight
+    # corridor run. Wired into the BT (see nav2_bt_recovery_backup_first.xml)
+    # as a SmoothPath step between ComputePathToPose and FollowPath.
+    SimpleSmoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: true
 
 behavior_server:
   ros__parameters:

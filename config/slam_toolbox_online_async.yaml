@@ -81,14 +81,28 @@ slam_toolbox:
 
     correlation_search_space_dimension: 0.5
     correlation_search_space_resolution: 0.01
-    correlation_search_space_smear_deviation: 0.1
+    # 2026-09-14: was 0.1 - in a long feature-poor corridor the scan matcher was
+    # repeatedly picking a near-180deg-flipped match (MAP JUMP WATCHDOG caught
+    # yaw_delta_deg up to 175 in <1s, do_loop_closing already false so this was
+    # the plain scan matcher, not loop closure) - a straight corridor looks
+    # almost identical facing either way, so a wide/smeared correlation peak
+    # let the wrong-orientation candidate score competitively. Sharper peak
+    # (lower smear) reduces how easily two near-symmetric candidates tie.
+    correlation_search_space_smear_deviation: 0.05
 
     loop_search_space_dimension: 8.0
     loop_search_space_resolution: 0.05
     loop_search_space_smear_deviation: 0.03
 
-    distance_variance_penalty: 0.5
-    angle_variance_penalty: 1.0
+    # 2026-09-14: both raised (0.5/1.0) alongside the smear_deviation change
+    # above - these penalize a candidate match the further it sits from the
+    # odometry-predicted pose. A real 175deg/<1s flip is physically impossible
+    # for this chassis (max_vel_theta 0.45 rad/s), so odometry should never
+    # predict anywhere near it; raising these penalties makes the matcher
+    # trust odometry continuity more and reject a same-score-but-flipped
+    # candidate instead of jumping to it.
+    distance_variance_penalty: 1.0
+    angle_variance_penalty: 3.0
 
     fine_search_angle_offset: 0.00349
     coarse_search_angle_offset: 0.349

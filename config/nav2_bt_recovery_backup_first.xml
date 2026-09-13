@@ -18,6 +18,11 @@
      (visible as excessive in-place-style turning). RecoveryActions now runs
      directly (GoalUpdated removed) so a stuck robot always gets one real
      clearing/backup/spin/wait attempt before a new goal is allowed to take over.
+  3) 2026-09-13: added a SmoothPath step (nav2_smoother/SimpleSmoother, see
+     nav2_params.yaml) right after ComputePathToPose - the raw NavFn grid path
+     was being passed straight to FollowPath, and PathAlign closely tracking
+     its 0.05m-cell stairsteps down a corridor looked like excessive
+     side-to-side reorientation instead of a direct run.
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -27,7 +32,10 @@
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+            <Sequence>
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+              <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="SimpleSmoother"/>
+            </Sequence>
             <Sequence>
               <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
               <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
