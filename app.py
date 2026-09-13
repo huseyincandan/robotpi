@@ -738,15 +738,30 @@ async def _run_map_jump_watchdog():
         )
         recovering = bool(getattr(motor, "recovering", False)) or recovery_settling
 
+        # Read gyro FIRST (not just as a fallback after a pose-jump fires) - a
+        # sustained real nav2/DWB turn (confirmed live: -36%/+36% commanded for
+        # 2+ seconds, real gyro ~90-100dps) is exactly the kind of fast, genuine
+        # rotation detect_pose_jump would otherwise mistake for a SLAM glitch and
+        # respond to with a destructive full map reset.
+        gyro_z_dps = None
+        if imu:
+            try:
+                sample = await asyncio.to_thread(imu.read_motion)
+                gyro_z_dps = float(sample["gyro_z"])
+            except Exception as exc:
+                print("MAP JUMP WATCHDOG: gyro read failed:", repr(exc), flush=True)
+
         try:
-            jump = mapping.detect_pose_jump(robot_moving=not recovering)    
+            jump = mapping.detect_pose_jump(
+                robot_moving=not recovering,
+                gyro_z_dps=gyro_z_dps
+            )
         except Exception as exc:
             print("MAP JUMP WATCHDOG CHECK ERROR:", repr(exc), flush=True)
             continue
 
-        if not jump and bool(MAP.get("MAP_IMU_YAW_WATCHDOG_ENABLED", True)) and imu:
+        if not jump and bool(MAP.get("MAP_IMU_YAW_WATCHDOG_ENABLED", True)) and gyro_z_dps is not None:
             try:
-                sample = await asyncio.to_thread(imu.read_motion)
                 robot_moving = (
                     not recovering
                     and (
@@ -755,7 +770,7 @@ async def _run_map_jump_watchdog():
                     )
                 )
                 jump = mapping.detect_imu_yaw_divergence(
-                    sample["gyro_z"],
+                    gyro_z_dps,
                     robot_moving=robot_moving
                 )
             except Exception as exc:

@@ -44,6 +44,7 @@ class Ros2SlamService:
         self.virtual_obstacles_file = output_dir / MAP.get("ROS2_VIRTUAL_OBSTACLES_FILE", "virtual_obstacles.json")
 
         self._last_jump_check_pose = None
+        self._pose_jump_fast_turn_until = 0.0
         self._last_imu_yaw_check = None
         self._slam_imu_yaw_error = 0.0
         self._imu_yaw_stationary_samples = 0
@@ -335,7 +336,23 @@ class Ros2SlamService:
 
         return f"stopped({code})"
 
-    def detect_pose_jump(self, robot_moving=True):
+    def detect_pose_jump(self, robot_moving=True, gyro_z_dps=None):
+
+        # A sustained max-clamp nav2/DWB turn (confirmed live: -36%/+36% commanded
+        # for 2+ seconds, real gyro ~90-100dps) is a genuine, intentional rotation,
+        # not a SLAM scan-matcher glitch - flag it the same way detect_imu_yaw_
+        # divergence() already does, so it doesn't trigger a destructive full map
+        # reset. Grace window keeps this active briefly after the turn ends too,
+        # since the watchdog only samples gyro once per tick (interval can span
+        # the whole turn) and pose deltas lag slightly behind real motion.
+        now_mono = time.monotonic()
+        if gyro_z_dps is not None and abs(float(gyro_z_dps)) >= float(
+            MAP.get("MAP_IMU_YAW_FAST_TURN_DPS", 25.0)
+        ):
+            self._pose_jump_fast_turn_until = now_mono + float(
+                MAP.get("MAP_IMU_YAW_DISTURBANCE_GRACE_SECONDS", 3.0)
+            )
+        fast_turn_active = self._pose_jump_fast_turn_until > now_mono
 
         try:
             payload = json.loads(self.pose_file.read_text(encoding="utf-8"))
@@ -359,8 +376,9 @@ class Ros2SlamService:
         self._last_jump_check_pose = (x, y, yaw, updated_at)
 
         # keep the baseline pose fresh but skip the jump check itself during our
-        # own recovery turns, which are legitimately fast and not a SLAM glitch
-        if previous is None or not robot_moving:
+        # own recovery turns or a confirmed-real fast turn (gyro-corroborated),
+        # neither of which is a SLAM glitch
+        if previous is None or not robot_moving or fast_turn_active:
             return None
 
         prev_x, prev_y, prev_yaw, prev_updated_at = previous
@@ -519,6 +537,7 @@ class Ros2SlamService:
         self._clear_map_outputs()
 
         self._last_jump_check_pose = None
+        self._pose_jump_fast_turn_until = 0.0
         self._last_imu_yaw_check = None
         self._slam_imu_yaw_error = 0.0
         self._imu_yaw_stationary_samples = 0
