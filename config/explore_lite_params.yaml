@@ -47,6 +47,10 @@
     # information-rich frontiers over merely-closest ones, and raised
     # min_frontier_size to filter out tiny corner/edge slivers entirely.
     potential_scale: 1.5
+    # 2026-09-13: confirmed dead in this m-explore-ros2 fork - frontier_search.cpp's
+    # cost function never reads orientation_scale_, so no value here changes
+    # frontier selection. Consecutive goals can require large heading swings and
+    # that can't be tuned away on this side; see nav2_params.yaml RotateToGoal.
     orientation_scale: 0.0
     gain_scale: 2.5
     transform_tolerance: 0.3

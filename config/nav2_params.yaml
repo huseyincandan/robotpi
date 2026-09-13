@@ -99,7 +99,14 @@ controller_server:
       # blended-arc approaches instead. PathAlign/GoalAlign raised to favor
       # trajectories that curve into the local plan's heading rather than
       # snapping to a sharp point turn.
-      RotateToGoal.scale: 8.0
+      # 2026-09-13: explore_lite's frontier selection has no heading-awareness at
+      # all (orientation_scale is unused, see explore_lite_params.yaml), so back
+      # to back goals routinely land in wildly different directions - reported as
+      # the robot "looking around" instead of moving in a straight line. Lowered
+      # further from 8.0 so a large heading error is a soft nudge, not enough to
+      # win against PathAlign/GoalAlign, letting the planner curve into a turn
+      # instead of stopping to pivot first.
+      RotateToGoal.scale: 3.0
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0
       PathAlign.scale: 32.0
