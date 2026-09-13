@@ -261,6 +261,10 @@ class Ros2NavigationService:
         lidar_odom_correction_enabled = bool(MAP.get("ROS2_CMDVEL_LIDAR_ODOM_CORRECTION_ENABLED", True))
         lidar_odom_slip_scale = float(MAP.get("ROS2_CMDVEL_LIDAR_ODOM_SLIP_SCALE", 0.35))
         motor_odom_source_enabled = bool(MAP.get("ROS2_CMDVEL_MOTOR_ODOM_SOURCE_ENABLED", True))
+        encoder_odom_source_enabled = bool(MAP.get("ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED", False))
+        encoder_ticks_per_meter = float(MAP.get("ROS2_ENCODER_TICKS_PER_METER", 1000.0))
+        encoder_track_width_m = float(MAP.get("ROS2_ENCODER_TRACK_WIDTH_M", 0.16))
+        encoder_max_age_sec = float(MAP.get("ROS2_ENCODER_MAX_AGE_SECONDS", 0.5))
 
         if not Path(ros_python_bin).exists():
             return {
@@ -296,6 +300,10 @@ class Ros2NavigationService:
             f"--lidar-odom-correction-enabled {shlex.quote(str(lidar_odom_correction_enabled))} "
             f"--lidar-odom-slip-scale {shlex.quote(str(lidar_odom_slip_scale))} "
             f"--motor-odom-source-enabled {shlex.quote(str(motor_odom_source_enabled))} "
+            f"--encoder-odom-source-enabled {shlex.quote(str(encoder_odom_source_enabled))} "
+            f"--encoder-ticks-per-meter {shlex.quote(str(encoder_ticks_per_meter))} "
+            f"--encoder-track-width-m {shlex.quote(str(encoder_track_width_m))} "
+            f"--encoder-max-age-sec {shlex.quote(str(encoder_max_age_sec))} "
             f">> {shlex.quote(str(self._cmdvel_bridge_log))} 2>&1"
         )
 

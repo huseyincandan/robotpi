@@ -74,6 +74,22 @@ class CmdVelBridge(Node):
         self._motor_y_percent = 0.0
         self._motor_last_update_monotonic = None
 
+        # Real wheel-encoder-derived odom (2026-09-13) - preferred over the
+        # motor-percent estimate below when fresh, since it reflects actual
+        # wheel rotation instead of an assumed speed model. Still can't catch
+        # true slip (spinning wheel, stationary chassis) - lidar correction
+        # above still applies on top of whichever source is used.
+        self.encoder_odom_source_enabled = bool(args.encoder_odom_source_enabled)
+        self.encoder_ticks_per_meter = max(1.0, float(args.encoder_ticks_per_meter))
+        self.encoder_track_width_m = max(0.01, float(args.encoder_track_width_m))
+        self.encoder_max_age_sec = max(0.1, float(args.encoder_max_age_sec))
+        self._enc_prev_rl = None
+        self._enc_prev_rr = None
+        self._enc_prev_monotonic = None
+        self._encoder_v = 0.0
+        self._encoder_w = 0.0
+        self._encoder_last_update_monotonic = None
+
         self.subscription = self.create_subscription(
             Twist,
             args.cmd_vel_topic,
@@ -160,6 +176,30 @@ class CmdVelBridge(Node):
             self._motor_x_percent = float(payload.get("motor_x_percent", 0.0))
             self._motor_y_percent = float(payload.get("motor_y_percent", 0.0))
             self._motor_last_update_monotonic = time.monotonic()
+
+        self._update_encoder_odom(payload)
+
+    def _update_encoder_odom(self, payload):
+
+        enc_rl = payload.get("enc_rl")
+        enc_rr = payload.get("enc_rr")
+        if enc_rl is None or enc_rr is None:
+            return
+
+        now = time.monotonic()
+
+        if self._enc_prev_monotonic is not None:
+            dt = now - self._enc_prev_monotonic
+            if dt > 1e-3:
+                dist_l = (enc_rl - self._enc_prev_rl) / self.encoder_ticks_per_meter
+                dist_r = (enc_rr - self._enc_prev_rr) / self.encoder_ticks_per_meter
+                self._encoder_v = (dist_l + dist_r) / 2.0 / dt
+                self._encoder_w = (dist_r - dist_l) / self.encoder_track_width_m / dt
+                self._encoder_last_update_monotonic = now
+
+        self._enc_prev_rl = enc_rl
+        self._enc_prev_rr = enc_rr
+        self._enc_prev_monotonic = now
 
     def _ultrasonic_loop(self):
 
@@ -330,6 +370,13 @@ class CmdVelBridge(Node):
         w = self.current_angular
 
         if (
+            self.encoder_odom_source_enabled
+            and self._encoder_last_update_monotonic is not None
+            and (time.monotonic() - self._encoder_last_update_monotonic) <= self.encoder_max_age_sec
+        ):
+            # Real wheel-tick-derived velocity - most trustworthy source when fresh.
+            v = self._encoder_v
+        elif (
             self.motor_odom_source_enabled
             and self._motor_last_update_monotonic is not None
             and (time.monotonic() - self._motor_last_update_monotonic) <= self.imu_max_age_sec
@@ -417,6 +464,10 @@ def parse_args():
     parser.add_argument("--lidar-odom-correction-enabled", type=lambda v: str(v).lower() not in ("0", "false", "no"), default=True)
     parser.add_argument("--lidar-odom-slip-scale", type=float, default=0.35)
     parser.add_argument("--motor-odom-source-enabled", type=lambda v: str(v).lower() not in ("0", "false", "no"), default=True)
+    parser.add_argument("--encoder-odom-source-enabled", type=lambda v: str(v).lower() not in ("0", "false", "no"), default=False)
+    parser.add_argument("--encoder-ticks-per-meter", type=float, default=1000.0)
+    parser.add_argument("--encoder-track-width-m", type=float, default=0.16)
+    parser.add_argument("--encoder-max-age-sec", type=float, default=0.5)
     parser.add_argument("--ultrasonic-topic", default="/ultrasonic_range")
     parser.add_argument("--ultrasonic-rate-hz", type=float, default=10.0)
     parser.add_argument("--ultrasonic-x-offset", type=float, default=0.115)

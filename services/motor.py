@@ -188,12 +188,12 @@ class MotorService:
 
     def _parse_telemetry(self, text):
 
-        # Beklenen format: "TELEM ax ay az gx gy gz bus_voltage shunt_voltage_mv"
+        # Beklenen format: "TELEM ax ay az gx gy gz bus_voltage shunt_voltage_mv enc_rl enc_rr"
         # (bkz. MotorEspS3.ino pollTelemetry()) - bozuk/eksik bir satir sessizce
         # atlanir, bir sonraki TELEM satiri zaten yeni veri getirir.
         parts = text.split()
 
-        if len(parts) != 9:
+        if len(parts) != 11:
             return
 
         try:
@@ -211,6 +211,8 @@ class MotorService:
                 "gyro_z": values[5],
                 "bus_voltage": values[6],
                 "shunt_voltage_mv": values[7],
+                "enc_rl": int(values[8]),
+                "enc_rr": int(values[9]),
                 "received_at": time.monotonic()
             }
 

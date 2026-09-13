@@ -10,6 +10,11 @@
 #define RGB_BUILTIN 48
 #endif
 
+// Arduino'nun otomatik urettigi fonksiyon prototipleri struct tanimindan once
+// eklenebiliyor (motorWrite/motorInit/motorByName Motor* kullaniyor) - ileri
+// bildirim bu siralama sorununu onler, struct'in kendisi asagida degismeden kalir.
+struct Motor;
+
 // TODO: kendi ev Wi-Fi bilgilerinizi girin
 const char *WIFI_SSID = "Deco AP";
 const char *WIFI_PASSWORD = "Candan.2162";
@@ -35,6 +40,62 @@ const int WEB_SPEED = 150; // web arayuzundeki ileri/geri butonlarinin sabit hiz
 
 const int PWM_FREQ = 20000; // above audible range
 const int PWM_RES = 8;      // 0-255 duty
+
+// 2026-09-13: elle cevirme testiyle eslesme belirlendi - sol teker (RL) 37/38,
+// sag teker (RR) 39/40 pinlerine bagli. A/B kanal sirasi (hangisi once tetikliyor)
+// henuz dogrulanmadi ama quadrature kod her iki sirada da calisir, sadece pozitif/negatif
+// yon isareti ters cikarsa asagidaki QUAD_TABLE indeksleme sirasi (A<<1|B) yer degistirilebilir.
+#define ENC_RL_A 37
+#define ENC_RL_B 38
+#define ENC_RR_A 39
+#define ENC_RR_B 40
+
+volatile int32_t encPosRL = 0;
+volatile int32_t encPosRR = 0;
+volatile uint8_t encStateRL = 0;
+volatile uint8_t encStateRR = 0;
+
+// standart quadrature gray-code gecis tablosu: index=(eskiState<<2)|yeniState, deger=-1/0/+1
+static const int8_t QUAD_TABLE[16] = {0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0};
+
+void IRAM_ATTR encUpdateRL() {
+  uint8_t newState = (digitalRead(ENC_RL_A) << 1) | digitalRead(ENC_RL_B);
+  encPosRL += QUAD_TABLE[(encStateRL << 2) | newState];
+  encStateRL = newState;
+}
+
+// 2026-09-13: RL'ye gore RR ters isaretli cikti (ileri cevirince RR eksiye
+// gidiyordu) - RR icin A/B okuma sirasi RL'ye gore ters oldugu icin bit
+// sirasi (B<<1)|A ile degistirilip isaret RL ile ayni yone getirildi.
+void IRAM_ATTR encUpdateRR() {
+  uint8_t newState = (digitalRead(ENC_RR_B) << 1) | digitalRead(ENC_RR_A);
+  encPosRR += QUAD_TABLE[(encStateRR << 2) | newState];
+  encStateRR = newState;
+}
+
+void encoderInit() {
+  pinMode(ENC_RL_A, INPUT_PULLUP);
+  pinMode(ENC_RL_B, INPUT_PULLUP);
+  pinMode(ENC_RR_A, INPUT_PULLUP);
+  pinMode(ENC_RR_B, INPUT_PULLUP);
+  encStateRL = (digitalRead(ENC_RL_A) << 1) | digitalRead(ENC_RL_B);
+  encStateRR = (digitalRead(ENC_RR_B) << 1) | digitalRead(ENC_RR_A);
+  attachInterrupt(digitalPinToInterrupt(ENC_RL_A), encUpdateRL, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_RL_B), encUpdateRL, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_RR_A), encUpdateRR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC_RR_B), encUpdateRR, CHANGE);
+}
+
+// test amacli: enkoder pozisyonlarini ~500ms'de bir USB Seri Monitor'e de yazar
+const unsigned long ENC_DEBUG_INTERVAL_MS = 500;
+unsigned long lastEncDebugMs = 0;
+
+void pollEncoderDebug() {
+  unsigned long now = millis();
+  if (now - lastEncDebugMs < ENC_DEBUG_INTERVAL_MS) return;
+  lastEncDebugMs = now;
+  Serial.printf("ENC RL=%ld RR=%ld\n", (long) encPosRL, (long) encPosRR);
+}
 
 // Raspberry Pi 5 baglantisi: ayri bir donanim UART (USB uzerindeki debug Serial'dan bagimsiz)
 // Kablolama: S3 GPIO17(TX) -> Pi RXD, S3 GPIO18(RX) -> Pi TXD, ortak GND
@@ -146,9 +207,16 @@ struct Motor {
   bool reversed; // motor karsi yonde monte edildiyse yon tersine cevrilir
 };
 
-// sol taraftaki motor fiziksel olarak ters monte edildigi icin reversed=true
-Motor motorRL = {PIN_RL_IN1, PIN_RL_IN2, PIN_RL_PWM, true};
-Motor motorRR = {PIN_RR_IN1, PIN_RR_IN2, PIN_RR_PWM, false};
+// 2026-09-13: enkoderli motorlara gecince kablo kutuplari eskisinin tersi
+// oldu, ileri/geri komutu tum tekerlerde ters donuyordu - her iki reversed
+// bayragi da ters cevrilerek duzeltildi (RL/RR arasindaki bagil fark korunur).
+// 2026-09-13 (later): ileri/geri artik dogruydu ama sol/sag yer degistirmisti -
+// yeni motorlar TB6612'ye eski motorlarin tam tersi tarafa baglanmis (fiziksel
+// solda montajli motor RR pinlerine, sagdaki RL pinlerine kablolu). Duzeltme
+// icin pin+reversed ciftleri (fiziksel motora ait) oldugu gibi tutulup sadece
+// RL/RR etiketleri karsilikli degistirildi.
+Motor motorRL = {PIN_RR_IN1, PIN_RR_IN2, PIN_RR_PWM, true};
+Motor motorRR = {PIN_RL_IN1, PIN_RL_IN2, PIN_RL_PWM, false};
 
 void motorInit(const Motor &m) {
   pinMode(m.in1, OUTPUT);
@@ -322,6 +390,7 @@ button{font-size:15px;padding:10px 12px;margin:3px;border:none;border-radius:6px
 <button class="bwd" id="RR_bwd">Geri</button></div>
 </div>
 <button class="stopall" onclick="fetch('/stopall')">TUMUNU DURDUR</button>
+<p><a href="/encoders" style="color:#1976d2">Enkoder Testi</a></p>
 <script>
 function send(motor,dir){fetch(`/set?motor=${motor}&dir=${dir}`);}
 function bindHold(id,motor,dir){
@@ -458,6 +527,65 @@ void handleStatus() {
   server.send(200, "text/plain", buf);
 }
 
+// JS'in ~300ms'de bir fetch ile okudugu yon farkindali enkoder pozisyonlari
+void handleEncValues() {
+  char buf[64];
+  snprintf(buf, sizeof(buf), "RL=%ld RR=%ld\n", (long) encPosRL, (long) encPosRR);
+  server.send(200, "text/plain", buf);
+}
+
+void handleEncReset() {
+  encPosRL = 0;
+  encPosRR = 0;
+  server.send(200, "text/plain", "OK");
+}
+
+// USB Seri Monitor'e erisim olmadan (OTA ile) enkoder testi icin - tarayicidan
+// canli izlenebilen sayfa; RL/RR yon farkindali (quadrature) pozisyonlarini gosterir.
+const char ENC_PAGE_HTML[] PROGMEM = R"HTML(
+<!DOCTYPE html><html lang="tr"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Enkoder Testi</title>
+<style>
+body{font-family:sans-serif;text-align:center;background:#111;color:#eee}
+h1{margin-top:20px;font-size:20px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:420px;margin:20px auto}
+.pin{background:#222;border-radius:10px;padding:16px}
+.pin .num{font-size:13px;color:#999}
+.pin .val{font-size:32px;font-weight:bold;margin-top:6px}
+button{font-size:16px;padding:12px 24px;margin-top:10px;border:none;border-radius:6px;cursor:pointer;background:#b71c1c;color:#fff}
+a{color:#1976d2}
+</style></head><body>
+<h1>Enkoder Pozisyon Testi</h1>
+<div class="grid">
+<div class="pin"><div class="num">Sol Teker (RL, GPIO 37/38)</div><div class="val" id="vRL">0</div></div>
+<div class="pin"><div class="num">Sag Teker (RR, GPIO 39/40)</div><div class="val" id="vRR">0</div></div>
+</div>
+<button onclick="fetch('/encreset')">SIFIRLA</button>
+<p><a href="/">Kontrol paneline don</a></p>
+<script>
+async function poll(){
+  try{
+    const r=await fetch('/encvalues');
+    const t=await r.text();
+    t.trim().split(' ').forEach(pair=>{
+      const [name,val]=pair.split('=');
+      const el=document.getElementById('v'+name);
+      if(el) el.textContent=val;
+    });
+  }catch(e){}
+}
+setInterval(poll,300);
+poll();
+</script>
+</body></html>
+)HTML";
+
+void handleEncoders() {
+  server.sendHeader("Cache-Control", "no-store");
+  server.send_P(200, "text/html", ENC_PAGE_HTML);
+}
+
 void handleDrive() {
   if (!server.hasArg("vx") || !server.hasArg("omega")) {
     server.send(400, "text/plain", "eksik parametre");
@@ -585,8 +713,11 @@ void initSensors() {
   }
 }
 
-// TELEM_INTERVAL_MS'de bir Pi'ye "TELEM ax ay az gx gy gz busV shuntMv" satiri gonderir;
-// okuma basarisiz olursa o dongude hic satir gonderilmez (Pi tarafi bunu bayatlik/timeout ile anlar)
+// TELEM_INTERVAL_MS'de bir Pi'ye "TELEM ax ay az gx gy gz busV shuntMv encRL encRR" satiri gonderir;
+// okuma basarisiz olursa o dongude hic satir gonderilmez (Pi tarafi bunu bayatlik/timeout ile anlar).
+// encRL/encRR: 2026-09-13'te eklenen kadranaj (quadrature) enkoderlerin kumulatif tik sayaclari -
+// navigasyonda gercek tekerlek odometrisi icin kullanilir (bkz. services/motor.py _parse_telemetry,
+// scripts/ros2_cmdvel_bridge.py encoder-based odom).
 void pollTelemetry() {
   if (!ENABLE_TELEMETRY) return;
 
@@ -612,8 +743,11 @@ void pollTelemetry() {
   lastShuntMv = shuntMv;
   lastPowerReadMs = now;
 
-  PiSerial.printf("TELEM %.4f %.4f %.4f %.3f %.3f %.3f %.4f %.3f\n",
-                  ax, ay, az, gx, gy, gz, busV, shuntMv);
+  // encPosRL/encPosRR: 32-bit hizalanmis okuma tek instruction'da atomik (ISR yari yolda
+  // kesmez), pollEncoderDebug()/handleEncValues() de ayni sekilde kilitsiz okuyor.
+  PiSerial.printf("TELEM %.4f %.4f %.4f %.3f %.3f %.3f %.4f %.3f %ld %ld\n",
+                  ax, ay, az, gx, gy, gz, busV, shuntMv,
+                  (long) encPosRL, (long) encPosRR);
 }
 
 // Pi'den gelen satir tabanli komutlari isle. Desteklenen komutlar:
@@ -749,6 +883,7 @@ void setup() {
 
   motorInit(motorRL);
   motorInit(motorRR);
+  encoderInit();
   stopAll(); // web arayuzunden komut gelene kadar dur
 
   WiFi.mode(WIFI_STA);
@@ -792,6 +927,9 @@ void setup() {
   server.on("/stopall", handleStopAll);
   server.on("/drive", handleDrive);
   server.on("/status", handleStatus);
+  server.on("/encoders", handleEncoders);
+  server.on("/encvalues", handleEncValues);
+  server.on("/encreset", handleEncReset);
   server.begin();
 }
 
@@ -800,4 +938,5 @@ void loop() {
   ArduinoOTA.handle();
   pollPiSerial();
   pollTelemetry();
+  pollEncoderDebug();
 }

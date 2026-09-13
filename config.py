@@ -363,8 +363,9 @@ MAP = {
     # Final fused odom topic (published by robot_localization's EKF, see
     # ROS2_EKF_PARAMS_FILE) - this is what nav2_params.yaml/collision_monitor
     # consume. ROS2_ODOM_RAW_TOPIC is the EKF's own unfused input from
-    # ros2_cmdvel_bridge.py (no wheel encoders, so it's a motor/commanded
-    # velocity-derived estimate, not a true wheel odometry source).
+    # ros2_cmdvel_bridge.py - since 2026-09-13 this can be real encoder-tick-
+    # derived wheel odometry (see ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED
+    # below) instead of the older commanded-velocity estimate.
     "ROS2_ODOM_TOPIC": "/odom",
     "ROS2_ODOM_RAW_TOPIC": "/odom_raw",
     "ROS2_ODOM_FRAME": "odom",
@@ -401,10 +402,10 @@ MAP = {
     "ROS2_IMU_GYRO_SIGN": 1.0,
     "ROS2_IMU_STATIONARY_DEADBAND_DPS": 0.5,
     "ROS2_IMU_GYRO_Z_VARIANCE": 0.02,
-    # There are no wheel encoders, so commanded linear velocity is blindly
-    # integrated into odom translation by default. On a slippery floor the
-    # wheels can spin while the robot barely moves, which makes Nav2 think
-    # it reached a waypoint it never actually reached. When the lidar's
+    # There are wheel encoders as of 2026-09-13 (see ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED),
+    # but they can't detect actual wheel slip (a spinning-but-not-moving wheel
+    # still reports rotation) - only translation, not yaw, is derived from them.
+    # When the lidar's
     # omnidirectional motion signature (see MOTOR.LIDAR_VERIFY_*) reports
     # insufficient motion for the commanded drive, scale down the linear
     # velocity used for odom integration so Nav2's own costmap/planner sees
@@ -418,6 +419,40 @@ MAP = {
     # (kaynak fark etmeksizin, GET /imu/motion uzerinden) kullanarak odom
     # cevirisini hesapliyoruz.
     "ROS2_CMDVEL_MOTOR_ODOM_SOURCE_ENABLED": True,
+    # 2026-09-13: gercek tekerlek enkoderleri eklendi (MotorEspS3.ino ENC_RL_A/B,
+    # ENC_RR_A/B, TELEM satirinin son iki alani) - onceden tamamen acik-cevrimli
+    # (komut edilen hiz -> varsayilan model) olan odom cevirisi artik gercek tik
+    # farkindan hesaplanabiliyor. ENCODER_ODOM_SOURCE_ENABLED, MOTOR_ODOM_SOURCE'dan
+    # ONCE denenir (ikisi de acilirsa) - encoder verisi taze degilse otomatik olarak
+    # MOTOR_ODOM_SOURCE_ENABLED yoluna (komut edilen yuzdeye) duser.
+    # KALIBRASYON GEREKLI: asagidaki iki deger henuz olculmedi (PLACEHOLDER).
+    # Olcum yontemi (bu depodaki mevcut "ampirik kalibrasyon" pratigiyle ayni):
+    #   1) ENCODER_TICKS_PER_METER: robotu duz bir zeminde bilinen bir mesafe
+    #      (ör. 1.0m, /map/pose ile olculur) kadar surup /imu/motion'daki
+    #      enc_rl/enc_rr farkinin ortalamasini mesafeye bolun.
+    #      ticks_per_meter = ortalama(delta_enc_rl, delta_enc_rr) / mesafe_m
+    #   2) ENCODER_TRACK_WIDTH_M: robotu yerinde (sabit merkez) N tam tur (ör.
+    #      360 derece) dondurup delta_enc_rl ve delta_enc_rr'nin ZIT isaretli
+    #      farkindan tekerlek cevresi mesafesini hesaplayip aci ile orantilayin:
+    #      track_width_m = (|delta_dist_rl| + |delta_dist_rr|) / aci_rad
+    #   Olcum bitene kadar ENABLED=False birakin (varsayilan hatali sabitlerle
+    #   yanlis odom Nav2'yi yanilmasin diye).
+    # 2026-09-14 ON KALIBRASYON (tek ornekli, kisa mesafe): SLAM pose + enkoder
+    # tik farki kullanilarak /drive?source=manual ile guvenli, kisa (~3.45cm
+    # ileri, ~17.4 derece donus) bir test yapildi (ultrasonik onceki oturumda
+    # "GPIO busy" hatasiyla calismiyordu, app yeniden baslatilarak duzeltildi).
+    # Ileri: delta_enc_rl=723, delta_enc_rr=780, SLAM mesafesi=0.034497m ->
+    #   ticks_per_meter = ortalama(723,780)/0.034497 = ~21786
+    # Donus: delta_enc_rl=-211, delta_enc_rr=+1392, SLAM aci=0.303153 rad ->
+    #   track_width_m = (0.009688+0.063901)/0.303153 = ~0.2428
+    # NOT: 3.45cm cok kisa bir mesafe oldugu icin SLAM pose gurultusune gore
+    # goreli hata payi yuksek olabilir - daha uzun/guvenli bir mesafeyle (once
+    # onden bosluk teyit edilerek) tekrar olcup dogrulamak onerilir. Bu yuzden
+    # ENABLED hala False - deger placeholder'dan gercege yakin ama teyitsiz.
+    "ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED": False,
+    "ROS2_ENCODER_TICKS_PER_METER": 21786.0,
+    "ROS2_ENCODER_TRACK_WIDTH_M": 0.243,
+    "ROS2_ENCODER_MAX_AGE_SECONDS": 0.5,
     # Watchdog for slam_toolbox scan-matching failures: a real robot can't
     # move faster than ROS2_NAV2_MAX_LINEAR_X, so a much larger implied
     # speed between two pose samples means the map->odom TF jumped (a

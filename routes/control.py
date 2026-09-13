@@ -568,6 +568,15 @@ def register_control_routes(
                 "message": str(exc)
             }
 
+        enc_rl = None
+        enc_rr = None
+        try:
+            telemetry = motor.get_telemetry()
+            enc_rl = telemetry.get("enc_rl")
+            enc_rr = telemetry.get("enc_rr")
+        except Exception:
+            pass  # encoder ticks stay None if TELEM is stale/unavailable
+
         return {
             "status": "OK",
             "gyro_z_dps": float(sample["gyro_z"]),
@@ -577,7 +586,9 @@ def register_control_routes(
             "lidar_motion_verified": motor.last_lidar_motion_verified,
             "lidar_motion_score": motor.last_lidar_motion_score,
             "motor_x_percent": float(getattr(motor, "current_x", 0.0)),
-            "motor_y_percent": float(getattr(motor, "current_y", 0.0))
+            "motor_y_percent": float(getattr(motor, "current_y", 0.0)),
+            "enc_rl": enc_rl,
+            "enc_rr": enc_rr
         }
 
     @router.get("/battery/status")
