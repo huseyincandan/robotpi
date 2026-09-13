@@ -722,6 +722,11 @@ async def _run_power_safety_watchdog():
 async def _run_map_jump_watchdog():
 
     interval = float(MAP.get("MAP_JUMP_CHECK_INTERVAL_SECONDS", 2.0))
+    auto_resume_enabled = bool(MAP.get("MAP_JUMP_AUTO_RESUME_ENABLED", True))
+    auto_resume_settle = float(MAP.get("MAP_JUMP_AUTO_RESUME_SETTLE_SECONDS", 2.0))
+    auto_resume_max_retries = int(MAP.get("MAP_JUMP_AUTO_RESUME_MAX_RETRIES", 3))
+    auto_resume_window = float(MAP.get("MAP_JUMP_AUTO_RESUME_WINDOW_SECONDS", 300.0))
+    reset_history = []
 
     while True:
         await asyncio.sleep(max(0.5, interval))
@@ -761,7 +766,13 @@ async def _run_map_jump_watchdog():
 
         print("MAP JUMP DETECTED, AUTO-RESETTING SLAM MAP:", jump, flush=True)
 
+        was_exploring = False
         if navigator:
+            try:
+                was_exploring = bool(navigator.status().get("explore_running"))
+            except Exception as exc:
+                print("MAP JUMP WATCHDOG: status check failed:", repr(exc), flush=True)
+
             try:
                 navigator.stop_exploration()
             except Exception as exc:
@@ -778,7 +789,30 @@ async def _run_map_jump_watchdog():
         except Exception as exc:
             print("MAP JUMP WATCHDOG: mapping.reset failed:", repr(exc), flush=True)
 
-        print("MAP JUMP WATCHDOG: exploration remains stopped after reset", flush=True)
+        now = time.monotonic()
+        reset_history[:] = [t for t in reset_history if now - t < auto_resume_window]
+        reset_history.append(now)
+
+        if not (auto_resume_enabled and was_exploring and navigator):
+            print("MAP JUMP WATCHDOG: exploration remains stopped after reset", flush=True)
+            continue
+
+        if len(reset_history) > auto_resume_max_retries:
+            print(
+                "MAP JUMP WATCHDOG: too many resets in the last",
+                auto_resume_window,
+                "s (", len(reset_history), ") - staying stopped, needs manual review",
+                flush=True
+            )
+            continue
+
+        await asyncio.sleep(max(0.0, auto_resume_settle))
+
+        try:
+            resume_result = navigator.start_exploration()
+            print("MAP JUMP WATCHDOG: auto-resuming exploration:", resume_result, flush=True)
+        except Exception as exc:
+            print("MAP JUMP WATCHDOG: auto-resume start_exploration failed:", repr(exc), flush=True)
 
 
 async def _run_lidar_freeze_watchdog():

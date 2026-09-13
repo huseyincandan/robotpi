@@ -429,6 +429,21 @@ class Ros2SlamService:
             MAP.get("MAP_IMU_YAW_DISTURBANCE_GRACE_SECONDS", 3.0)
         )
 
+        # A single lidar sweep takes ~150-200ms, so a fast in-place turn (any
+        # source - manual, nav2, explore, recovery) smears each scan across
+        # several real headings; slam_toolbox has no motion deskew, so it
+        # legitimately disagrees with the gyro while this is happening. That
+        # is expected sensor disagreement, not map corruption, so keep
+        # refreshing the grace window for as long as the gyro itself reports
+        # a fast turn - only start counting once it actually settles down.
+        fast_turn_dps = float(MAP.get("MAP_IMU_YAW_FAST_TURN_DPS", 25.0))
+        if abs(float(gyro_z_dps)) >= fast_turn_dps:
+            self._imu_yaw_disturbance_active = True
+            self._imu_yaw_disturbance_until = updated_at + disturbance_grace
+            self._slam_imu_yaw_error = 0.0
+            self._imu_yaw_stationary_samples = 0
+            return None
+
         if abs(instantaneous_error) >= disturbance_delta:
             if not self._imu_yaw_disturbance_active:
                 self._imu_yaw_disturbance_active = True

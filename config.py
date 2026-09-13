@@ -485,6 +485,22 @@ MAP = {
     "MAP_IMU_YAW_MAX_ERROR_DEG": 40.0,
     "MAP_IMU_YAW_DISTURBANCE_DELTA_DEG": 8.0,
     "MAP_IMU_YAW_DISTURBANCE_GRACE_SECONDS": 3.0,
+    # 2026-09-13: lidar tek bir 360 taramayi ~150-200ms'de bitiriyor, hizli
+    # yerinde donuslerde (nav2 frontier'a bakma, manuel pivot, recovery)
+    # taramanin ici farkli gercek baslıklara denk gelir (motion smear) ve
+    # slam_toolbox bunu telafi etmiyor (deskew yok) - SLAM/IMU uyusmazligi
+    # bu durumda beklenen bir yan etki, harita bozulmasi degil. Jiroskop
+    # kendisi bu esigin uzerindeyken hatayi biriktirme, sadece donus
+    # yavaslayip/durduktan sonraki gercek uyusmazligi say.
+    "MAP_IMU_YAW_FAST_TURN_DPS": 25.0,
+    # Reset sonrasi exploration'i otomatik devam ettir (motor zaten durdu,
+    # robot hareketsizken hata sifirlaniyor - insan mudahalesi olmadan devam
+    # edebilmesi lazim). Kisa surede tekrar tekrar tetiklenirse (gercek/
+    # kalici bir sorun ihtimali) otomatik devami durdurup manuel incelemeye birak.
+    "MAP_JUMP_AUTO_RESUME_ENABLED": True,
+    "MAP_JUMP_AUTO_RESUME_SETTLE_SECONDS": 2.0,
+    "MAP_JUMP_AUTO_RESUME_MAX_RETRIES": 3,
+    "MAP_JUMP_AUTO_RESUME_WINDOW_SECONDS": 300.0,
     # 2026-09-05: guc/I2C glitch (bkz. repo notlari) sirasinda lidar'in
     # USB-seri baglantisi donup /scan yayinini tamamen durdurabiliyor, ve
     # kendi kendine toparlanmiyor (glitch bitmesine ragmen dakikalarca
