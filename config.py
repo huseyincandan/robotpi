@@ -148,10 +148,28 @@ POWER_MONITOR = {
     "DRIVE_SAFETY_ENABLED": True,
     "DRIVE_SAFETY_INTERVAL_SECONDS": 0.05,
     "DRIVE_READ_TIMEOUT_SECONDS": 0.35,
-    "DRIVE_READ_ERROR_SAMPLES": 1,
+    # 2026-09-14: was 1 - a SINGLE transient TELEM read timeout (e.g. one late
+    # ESP UART line during heavy traffic) instantly latched power_fault=True
+    # forever (see app.py _run_power_safety_watchdog comment) with no way to
+    # recover except a full app restart. This silently blocked ALL /drive
+    # commands (both manual and nav2) for the rest of the process lifetime
+    # while still returning HTTP 200 - found to be the actual root cause of a
+    # "robot completely refuses to move" incident that looked like a
+    # mechanical/rotation problem from the outside. Raised to 3 so a lone
+    # blip doesn't trip it; a real sustained comms failure still trips within
+    # ~3 read cycles.
+    "DRIVE_READ_ERROR_SAMPLES": 3,
     "DRIVE_CRITICAL_VOLTAGE": 10.8,
     "DRIVE_CRITICAL_SAMPLES": 2,
-    "DRIVE_LOG_INTERVAL_SECONDS": 0.25
+    "DRIVE_LOG_INTERVAL_SECONDS": 0.25,
+    # 2026-09-14: number of consecutive healthy reads required to
+    # self-clear a power_fault that was caused by reason="power_monitor_read"
+    # (a comms/telemetry glitch, not a real low-voltage trip). A genuine
+    # low-voltage trip (reason absent, real bus_voltage sample recorded)
+    # NEVER auto-clears - that stays latched on purpose, requiring an
+    # operator to notice/restart, since driving on a truly critical battery
+    # is a real hazard.
+    "DRIVE_FAULT_CLEAR_SAMPLES": 5
 }
 
 IMU = {

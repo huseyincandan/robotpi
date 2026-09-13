@@ -586,15 +586,75 @@ async def _run_power_safety_watchdog():
     low_samples = 0
     read_errors = 0
     last_log = 0.0
+    clear_samples = max(
+        1,
+        int(POWER_MONITOR.get("DRIVE_FAULT_CLEAR_SAMPLES", 5))
+    )
+    fault_recovery_samples = 0
 
     while True:
         await asyncio.sleep(interval)
+
+        # 2026-09-14: power_fault used to latch PERMANENTLY with no recovery
+        # path other than a full app restart - even a single transient ESP
+        # TELEM staleness blip (read_errors>=DRIVE_READ_ERROR_SAMPLES) set
+        # power_fault=True forever, and since /drive refuses ALL nonzero x/y
+        # while power_fault is set (routes/control.py), current_x/current_y
+        # never become nonzero again either - so the `moving` gate below also
+        # never re-triggers, permanently starving this very loop from ever
+        # re-checking. This silently blocked driving indefinitely while still
+        # returning HTTP 200 ({"status":"BLOCKED"}) - looked identical from
+        # outside to "robot can't move" for any other reason. Only a
+        # power_monitor_read (comms/telemetry) fault self-heals here; a real
+        # low-voltage trip (bus_voltage sample recorded) stays latched
+        # forever on purpose - that is a genuine hazard needing operator
+        # attention, not something to auto-clear.
+        if bool(getattr(motor, "power_fault", False)):
+            fault_reason = None
+            last_fault = getattr(motor, "last_power_fault", None)
+            if isinstance(last_fault, dict):
+                fault_reason = last_fault.get("reason")
+
+            if fault_reason != "power_monitor_read":
+                fault_recovery_samples = 0
+                low_samples = 0
+                continue
+
+            try:
+                sample = await asyncio.wait_for(
+                    asyncio.to_thread(power_monitor.read),
+                    timeout=read_timeout
+                )
+            except Exception:
+                fault_recovery_samples = 0
+                continue
+
+            if float(sample["bus_voltage"]) <= critical_voltage:
+                fault_recovery_samples = 0
+                continue
+
+            fault_recovery_samples += 1
+            if fault_recovery_samples < clear_samples:
+                continue
+
+            motor.power_fault = False
+            motor.last_power_fault = None
+            fault_recovery_samples = 0
+            read_errors = 0
+            low_samples = 0
+            print(
+                "POWER SAFETY CLEARED:",
+                f"voltage={sample['bus_voltage']:.3f}V",
+                "(transient read fault self-healed)",
+                flush=True
+            )
+            continue
 
         moving = (
             abs(float(getattr(motor, "current_x", 0.0))) >= 0.5
             or abs(float(getattr(motor, "current_y", 0.0))) >= 0.5
         )
-        if not moving or bool(getattr(motor, "power_fault", False)):
+        if not moving:
             low_samples = 0
             continue
 
