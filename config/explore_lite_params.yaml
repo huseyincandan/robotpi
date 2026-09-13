@@ -15,7 +15,16 @@
     # behavior the user reported. Slowed down so the robot has real time to
     # make progress toward a goal (and the map to meaningfully update from
     # that progress) before the frontier ranking is re-evaluated.
-    planner_frequency: 0.15
+    # 2026-09-14: even at 0.15 (~6.7s), every resend preempts bt_navigator's
+    # in-flight FollowPath goal, which must halt()/cancel it first - live-
+    # reproduced twice that this cancel can fail ("Failed to get result for
+    # follow_path in node halt!", sometimes in under 1s, so it's a genuine
+    # nav2 action-handle race on this Pi, not just a slow response), and
+    # explore_lite has no automatic retry after that failure - it just stops
+    # entirely. Slowed further so each goal gets real uninterrupted time to
+    # either finish or genuinely fail on its own instead of being preempted
+    # out from under it; reduces how often this race can even be triggered.
+    planner_frequency: 0.05
     # Was 45.0, matching nav2 controller_server's own movement_time_allowance
     # (also 45.0). That made the two timeouts a race: explore_lite's own
     # progress watchdog fired within ~1s of nav2's "Failed to make progress",

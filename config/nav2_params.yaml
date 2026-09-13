@@ -8,6 +8,22 @@ bt_navigator:
     global_frame: map
     robot_base_frame: base_link
     odom_topic: /odom
+    # 2026-09-14: nav2's compiled-in default is only 20ms - confirmed via
+    # nav2_bringup's reference nav2_params.yaml (this project's config never
+    # set it explicitly before). explore_lite resends a goal every ~6-7s
+    # (planner_frequency), each resend makes bt_navigator halt() the
+    # in-flight FollowPath action first; on this Pi, a concurrent costmap
+    # resize (StaticLayer growing as the map fills in) can easily make that
+    # cancel/halt round-trip take longer than 20ms, so it timed out with
+    # "Failed to get result for follow_path in node halt!" and the whole
+    # navigate_to_pose goal was aborted - live-reproduced: explore stopped
+    # itself entirely after only ~35s over exactly this error. Widened so a
+    # brief scheduling/CPU hiccup doesn't kill an otherwise-healthy goal.
+    # 2026-09-14 FOLLOWUP: 2000 still failed, in under 1s - too fast for a
+    # mere timeout increase to explain, so this alone isn't the whole story
+    # (see planner_frequency note in explore_lite_params.yaml for the other
+    # half of the fix). Kept generous regardless.
+    default_server_timeout: 6000
     # Stock BT's RoundRobin recovery order is Spin -> Wait -> BackUp, and its
     # ReactiveFallback checks GoalUpdated first each tick, which skips
     # RecoveryActions entirely whenever explore_lite has already sent a new
