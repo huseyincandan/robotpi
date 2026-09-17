@@ -23,6 +23,20 @@
      was being passed straight to FollowPath, and PathAlign closely tracking
      its 0.05m-cell stairsteps down a corridor looked like excessive
      side-to-side reorientation instead of a direct run.
+  4) 2026-09-17: RateController hz was 1.0 (stock nav2 default). Live nav2 log
+     showed [follow_path][ActionServer] Aborting handle firing every ~1s
+     CONTINUOUSLY (125 times over one run, unrelated to whether the robot was
+     actually stuck) - every RateController tick recomputes a path with tiny
+     float differences even when almost nothing changed, and nav2's FollowPath
+     BT node treats any path-port change as a goal update, cancelling and
+     resending the FollowPath action every single time. With acc_lim_x=0.35
+     (0.24 m/s max_vel_x takes ~0.7s to reach), restarting the goal every 1s
+     never let DWB hold a steady speed - most cycles were spent ramping up
+     again from near-zero, which starved SimpleProgressChecker (0.05m/45s) of
+     real movement especially while maneuvering near a close obstacle (a couch
+ corner at front_cm~18/right_cm~12 stalled the robot for 25s with zero net
+ translation). Slowed to 0.3 (~3.3s cadence) so FollowPath gets real
+ uninterrupted time to build speed and make progress between replans.
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -30,7 +44,7 @@
       <PipelineSequence name="NavigateWithReplanning">
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
-        <RateController hz="1.0">
+        <RateController hz="0.3">
           <RecoveryNode number_of_retries="1" name="ComputePathToPose">
             <Sequence>
               <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
