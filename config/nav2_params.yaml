@@ -46,8 +46,19 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.05
-      # See explore_lite_params.yaml note: widened alongside its progress_timeout.
-      movement_time_allowance: 45.0
+      # 2026-09-17: lowered from 45.0 - the outer RecoveryNode's RoundRobin
+      # (ClearingActions->BackUp->Spin->Wait, see nav2_bt_recovery_backup_first.xml)
+      # only advances one step per "Failed to make progress" failure, so at
+      # 45.0 a genuinely wedged robot took 45-90s+ per escalation step (180s+
+      # to reach Spin/Wait) before getting real corrective action - live-
+      # observed stuck 90+s in a couch corner still cycling ClearingActions.
+      # explore_lite's own progress_timeout (120.0, see explore_lite_params.yaml)
+      # is well above this value so there's no race with the earlier
+      # 2026-09-14 halt-error fix. Lowered to 15.0 so the full escalation
+      # chain reaches BackUp within ~45s and Wait within ~75s instead of
+      # 135s/225s - needs a live retest to confirm this doesn't cause false
+      # progress-failures during legitimate slow/careful maneuvering.
+      movement_time_allowance: 15.0
 
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
