@@ -110,6 +110,12 @@ class IntentService:
 				"query": text
 			}
 
+		if self._is_device_status_command(normalized):
+			return {
+				"type": "device.status",
+				"query": text
+			}
+
 		music_control = self._music_control_intent(normalized)
 
 		if music_control:
@@ -272,7 +278,7 @@ class IntentService:
 		):
 			return False
 
-		return not words.isdisjoint(
+		has_action_word = not words.isdisjoint(
 			[
 				"artır",
 				"artir",
@@ -292,6 +298,40 @@ class IntentService:
 				"ayarla",
 				"yuzde",
 				"yüzde"
+			]
+		)
+
+		has_query_phrase = any(
+			phrase in normalized
+			for phrase in [
+				"kacta",
+				"kaçta",
+				"kac",
+				"kaç",
+				"nedir",
+				"ne kadar",
+				"ne durumda"
+			]
+		)
+
+		return has_action_word or has_query_phrase
+
+	def _is_device_status_command(self, normalized):
+
+		return any(
+			word in normalized
+			for word in [
+				"batarya",
+				"pil",
+				"sarj",
+				"şarj",
+				"akim",
+				"akım",
+				"amper",
+				"voltaj",
+				"gerilim",
+				"guc",
+				"güç"
 			]
 		)
 

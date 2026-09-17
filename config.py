@@ -341,29 +341,47 @@ MAP = {
     "ROS2_LIDAR_X_OFFSET_M": -0.085,
     "ROS2_LIDAR_DRIVER": "python_bridge",
     "ROS2_LIDAR_REVERSE_ANGLE": True,
-    # 2026-08-30: lidar fiziksel olarak yeniden yerlestirildi (~90 derece donuk).
-    # /lidar/calibrate ile olculdu: eski 180.0 offset'te gercek on, yayinlanan
-    # /scan aci=234 derecede cikiyordu (0 derece = base_link ileri varsayimiyla
-    # hizasiz, TF donusu sifir oldugu icin). Ilk duzeltme 306.0 uygulandi, ama
-    # sonraki tek-seferlik olcum gurultuluydu (muhtemelen restart sonrasi
-    # ultrasonik henuz stabil degilken alinan kirli veri) - 358.68 degerine
-    # atlandi. Iki TEMIZ/bagimsiz restart sonrasi olcum (66.0 ve 67.79, ayni
-    # bridge tabaninda) birbiriyle tutarli cikti - bu ikisinin ortalamasi
-    # (66.9) guvenilir kabul edildi. Ara deger: 358.68 - 66.9 = 291.78.
-    # Bu degerle harita/pose testinde (live_map.pgm'deki duvar/koltuk
-    # noktalarinin PCA ile olculen dogrultusu vs yaw_rad) kalinti ~22-26 derece
-    # sapma bulundu (3 bagimsiz olcum: koltuk 22.4/23.2, kapiya tam paralel/
-    # tekerlek temasli 25.8 derece - hepsi ayni yonde ve tutarli). Ilk denemede
-    # +24 eklendi (315.78) ama sapma 25.8 -> 49.6 dereceye CIKTI (yon ters
-    # cikti, +24 dogruluyor: 25.8+24=49.8). Dogru yon cikarma: 291.78 - 25.8 =
-    # 265.98. DOGRULANDI: bu degerle kapiya tam paralel (iki tekerlek de
-    # temasli) referansta yakin mesafe olcumu 0.1 derece sapma verdi (mukemmel
-    # eslesme). 2026-08-30 itibariyla nihai/guvenilir deger.
-    "ROS2_LIDAR_ANGLE_OFFSET_DEG": 265.98,
+    # TEK lidar montaj-acisi offset'i (obstacle-avoidance proxy'sindeki eski
+    # ayri ROS2_MOVEMENT_LOCAL_SCAN_OFFSET_DEG kaldirildi, artik yalnizca bu
+    # deger var; /scan zaten dogru yayinlaniyorsa proxy ek ofsete ihtiyac
+    # duymaz). 2026-08-30: lidar fiziksel olarak yeniden yerlestirildi (~90
+    # derece donuk). /lidar/calibrate ile olculdu: eski 180.0 offset'te gercek
+    # on, yayinlanan /scan aci=234 derecede cikiyordu. Ilk duzeltme 306.0
+    # uygulandi, ama sonraki tek-seferlik olcum gurultuluydu - 358.68 degerine
+    # atlandi. Iki TEMIZ/bagimsiz restart sonrasi olcum (66.0 ve 67.79)
+    # birbiriyle tutarli cikti - ortalamasi (66.9) guvenilir kabul edildi. Ara
+    # deger: 358.68 - 66.9 = 291.78. Harita/pose testinde (PCA ile duvar
+    # dogrultusu vs yaw_rad) kalinti ~22-26 derece sapma bulundu, dogru yon
+    # cikarma ile 291.78 - 25.8 = 265.98 bulundu, kapiya paralel referansta
+    # 0.1 derece sapma verdi (2026-08-30 degeri).
+    # 2026-09-17: lidar tekrar farkli monte edildi. /lidar/calibrate ile
+    # (motion-probe yontemi, cycles_used=2/4, spread=12.0deg, guclu delta
+    # -21.35/-31.35cm) gercek on'un o anki /scan uzayinda 142.86 derecede
+    # oldugu olculdu -> ilk kaba deger = 265.98 - 142.86 = 123.12 (bu KABA
+    # tahmin, motion-probe yontemi hassas kalibrasyon icin guvenilmez).
+    # Titiz dogrulama: robot bir kanepenin duz yuzeyine gozle paralel
+    # park edildi (kanepe solda ~12cm). Ham /scan verisinde (angle_deg,
+    # distance_cm) kanepeye ait 82 nokta (aci 56-193 derece araligi,
+    # PCA elongation ratio ~6000-6800 = neredeyse mukemmel duz cizgi)
+    # PCA ile duz cizgi olarak fit edildi: cizginin yerel /scan
+    # acisi (mod 180) = ~34.3 derece bulundu (3 bagimsiz olcum: 34.33,
+    # 34.31, 34.28 - tutarli). Robot fiziksel olarak kanepeye paralel
+    # oldugundan bu cizginin 0/180 derecede olcumu beklenirdi; 34.3
+    # derecelik sapma net bir kalibrasyon hatasi. Ayni anda harita+pose
+    # tabanli eski yontemle de capraz dogrulama yapildi (~33.7-33.8
+    # derece, ters isaretli ama ayni buyuklukte - iki bagimsiz yontem
+    # birbirini dogruluyor). Duzeltme: yeni_offset = eski_offset -
+    # olculen_sapma (2026-08-30'daki isaret dersine gore, once kucuk
+    # bir test ile dogrulanip sonra netlestirildi): 123.12 - 34.3 =
+    # 88.82. Restart sonrasi ayni yontemle tekrar olculup teyit edildi.
+    # 88.82 - 34.3 duzeltmesi 88.82 -> restart sonrasi ayni yontemle tekrar
+    # olculdu: sapma 34.3 -> 0.45 dereceye dustu (dogru yon dogrulandi).
+    # Son ince ayar: 88.82 - 0.45 = 88.37 -> restart + tekrar olcum: sapma
+    # -0.42 derece (ratio ~6763, cok temiz cizgi). NIHAI DOGRULANMIS DEGER.
+    "ROS2_LIDAR_ANGLE_OFFSET_DEG": 88.37,
     "ROS2_SLAM_LAUNCH": "online_async_launch.py",
     "ROS2_SLAM_PARAMS_FILE": "config/slam_toolbox_online_async.yaml",
     "ROS2_USE_SIM_TIME": False,
-    "ROS2_MOVEMENT_LOCAL_SCAN_OFFSET_DEG": 0.0,
     "ROS2_NAV2_ENABLED": True,
     "ROS2_NAV2_AUTOSTART": True,
     "ROS2_NAV2_PARAMS_FILE": "config/nav2_params.yaml",
@@ -555,8 +573,8 @@ MOVEMENT = {
 }
 
 AUDIO = {
-    "MICROPHONE_CARD": "U0x46d0x825",
-    "MICROPHONE_DEVICE": "dsnoop:CARD=U0x46d0x825,DEV=0",
+    "MICROPHONE_CARD": "ArrayUAC10",
+    "MICROPHONE_DEVICE": "dsnoop:CARD=ArrayUAC10,DEV=0",
     "MICROPHONE_FORMAT": "alsa",
     "MICROPHONE_BUFFER_SIZE": "9600",
     "MICROPHONE_PERIOD_SIZE": "960",
@@ -676,7 +694,7 @@ ASSISTANT = {
 INTENT = {
     "MODEL": "gpt-4o-mini",
     "TEMPERATURE": 0,
-    "SYSTEM_PROMPT": "Kullanıcının Türkçe cümlesinden robot komut niyetini çıkar. Sadece JSON döndür. Desteklenen type değerleri: chat, local.time, system.shutdown, robot.move, audio.volume, web.search, music.play, music.stop, music.pause, music.resume, music.next, music.previous, music.genres. Saat kaç, bugünün tarihi nedir, günlerden ne gibi yerel sistem saati/tarihi sorularında local.time döndür ve query boş string olsun. Robotu, Raspberry Pi'yi veya sistemi tamamen kapatma isteklerinde system.shutdown döndür ve query boş string olsun. İleri git, geri git, sağa dön, sola dön, biraz geri git, yarım metre ileri git gibi robot hareket isteklerinde robot.move döndür ve query alanına kullanıcının hareket cümlesini aynen yaz. Sesi aç, sesi kıs, sesi yüzde elli yap gibi hoparlör ses seviyesi komutlarında audio.volume döndür ve query alanına cümleyi aynen yaz. Güncel hava durumu, maç sonucu, haber, son dakika, borsa, döviz veya internette aranması gereken güncel bilgi isteklerinde web.search döndür ve query alanına kısa arama metni yaz. Müzik/radyo çalma isteklerinde music.play döndür; query alanına yalnızca istenen müzik türünü yaz (örnek: caz, klasik, karadeniz, ankara), tür belirtilmemişse query boş string olsun. Hangi radyo kanalları/türleri var, kanalları listele, neler çalabilirsin gibi mevcut müzik türlerini sorma isteklerinde music.genres döndür ve query boş string olsun. Sonraki şarkı/kanal, kanalı değiştir, başka kanal/istasyon isteklerinde music.next, önceki şarkı/kanal isteklerinde music.previous, müzik duraklatma/bekletme komutlarında music.pause, müziğe devam etme/sürdürme/oynatma komutlarında music.resume, müzik durdurma/kapatma komutlarında music.stop döndür ve query boş string olsun. Emin değilsen chat döndür."
+    "SYSTEM_PROMPT": "Kullanıcının Türkçe cümlesinden robot komut niyetini çıkar. Sadece JSON döndür. Desteklenen type değerleri: chat, local.time, system.shutdown, robot.move, audio.volume, device.status, web.search, music.play, music.stop, music.pause, music.resume, music.next, music.previous, music.genres. Saat kaç, bugünün tarihi nedir, günlerden ne gibi yerel sistem saati/tarihi sorularında local.time döndür ve query boş string olsun. Robotu, Raspberry Pi'yi veya sistemi tamamen kapatma isteklerinde system.shutdown döndür ve query boş string olsun. İleri git, geri git, sağa dön, sola dön, biraz geri git, yarım metre ileri git gibi robot hareket isteklerinde robot.move döndür ve query alanına kullanıcının hareket cümlesini aynen yaz. Sesi aç, sesi kıs, sesi yüzde elli yap, ses seviyesi kaçta/nedir gibi hoparlör ses seviyesini değiştiren veya soran isteklerde audio.volume döndür ve query alanına cümleyi aynen yaz. Batarya durumu, pil yüzdesi, şarj durumu, anlık akım/amper veya voltaj/gerilim sorularında device.status döndür ve query boş string olsun. Güncel hava durumu, maç sonucu, haber, son dakika, borsa, döviz veya internette aranması gereken güncel bilgi isteklerinde web.search döndür ve query alanına kısa arama metni yaz. Müzik/radyo çalma isteklerinde music.play döndür; query alanına yalnızca istenen müzik türünü yaz (örnek: caz, klasik, karadeniz, ankara), tür belirtilmemişse query boş string olsun. Hangi radyo kanalları/türleri var, kanalları listele, neler çalabilirsin gibi mevcut müzik türlerini sorma isteklerinde music.genres döndür ve query boş string olsun. Sonraki şarkı/kanal, kanalı değiştir, başka kanal/istasyon isteklerinde music.next, önceki şarkı/kanal isteklerinde music.previous, müzik duraklatma/bekletme komutlarında music.pause, müziğe devam etme/sürdürme/oynatma komutlarında music.resume, müzik durdurma/kapatma komutlarında music.stop döndür ve query boş string olsun. Emin değilsen chat döndür."
 }
 
 SYSTEM = {

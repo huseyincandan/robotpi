@@ -260,7 +260,6 @@ if not scan_file.is_absolute():
 lidar = Ros2LidarProxyService(
     scan_file=scan_file,
     sector_deg=float(LIDAR.get("SCAN_SECTOR_DEGREES", 30.0)),
-    angle_offset_deg=float(MAP.get("ROS2_MOVEMENT_LOCAL_SCAN_OFFSET_DEG", 0.0)),
     max_age_seconds=float(MAP.get("ROS2_MOVEMENT_SCAN_MAX_AGE_SECONDS", 2.5))
 )
 print("LIDAR SERVICE: ros2 scan proxy", flush=True)
@@ -419,7 +418,8 @@ async def start_wake_listener():
                 motor=motor,
                 music=music,
                 movement=movement,
-                speech=speech
+                speech=speech,
+                power_monitor=power_monitor
             )
         )
 

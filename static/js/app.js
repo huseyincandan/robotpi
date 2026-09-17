@@ -315,9 +315,9 @@ window.addEventListener(
             const data = await response.json();
 
             if (data && data.status === "OK") {
-                const offset = data.applied_offset_deg;
+                const offset = data.recommended_offset_deg;
                 if (typeof offset === "number") {
-                    setStatus("Lidar kalibrasyon tamamlandi (offset: " + offset.toFixed(2) + " deg)");
+                    setStatus("Onerilen ROS2_LIDAR_ANGLE_OFFSET_DEG: " + offset.toFixed(2) + " (config.py + restart gerekir)");
                 } else {
                     setStatus("Lidar kalibrasyon tamamlandi");
                 }

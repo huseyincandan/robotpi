@@ -5,6 +5,7 @@ import unicodedata
 import statistics
 
 from config import LIDAR
+from config import MAP
 from config import MOVEMENT
 
 
@@ -311,21 +312,22 @@ class MovementService:
 		)
 		best_delta = min(item["delta"] for item in estimates)
 
-		current_offset = float(self.lidar.get_angle_offset_deg())
-		new_offset = self._normalize_degrees(
+		# ROS2_LIDAR_ANGLE_OFFSET_DEG tek gecerli ofsettir ve bir ayri ROS2
+		# process'ine (rplidar bridge) launch aninda gecirilir; buradan canli
+		# uygulanamaz, sadece yeni deger hesaplanip config.py icin onerilir.
+		current_offset = float(MAP.get("ROS2_LIDAR_ANGLE_OFFSET_DEG", 0.0))
+		recommended_offset = self._normalize_degrees(
 			current_offset - target_front
-		)
-		applied = float(
-			self.lidar.set_angle_offset_deg(new_offset)
 		)
 
 		return {
 			"status": "OK",
-			"message": "LIDAR aci ofseti guncellendi",
+			"message": "Yeni ROS2_LIDAR_ANGLE_OFFSET_DEG hesaplandi, uygulamak icin config.py guncellenip ROS2 lidar/SLAM stack'i yeniden baslatilmali",
 			"estimated_front_angle_deg": round(target_front, 2),
 			"best_delta_cm": round(float(best_delta), 2),
 			"current_offset_deg": round(current_offset, 2),
-			"applied_offset_deg": round(applied, 2),
+			"recommended_offset_deg": round(recommended_offset, 2),
+			"requires_config_update_and_restart": True,
 			"cycles_total": cycles,
 			"cycles_used": len(estimates),
 			"max_spread_deg": round(max_spread, 2),

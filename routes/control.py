@@ -850,7 +850,6 @@ def register_control_routes(
 
         return {
             "status": "OK",
-            "offset_deg": float(lidar_service.get_angle_offset_deg()) if hasattr(lidar_service, "get_angle_offset_deg") else 0.0,
             "front_cm": sector_min(0.0),
             "left_cm": sector_min(90.0),
             "back_cm": sector_min(180.0),

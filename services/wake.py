@@ -706,6 +706,50 @@ async def _handle_local_time(text, local_info, speech, state):
 	return "continue"
 
 
+async def _handle_device_status(power_monitor, speech, state):
+
+	if not power_monitor:
+		answer = "Güç izleme servisi şu anda kullanılamıyor."
+
+	else:
+		try:
+			reading = await asyncio.to_thread(
+				power_monitor.read
+			)
+			answer = (
+				f"Batarya yüzde {reading['battery_percent']:.0f}, "
+				f"voltaj {reading['bus_voltage']:.1f} volt, "
+				f"akım {reading['current_ma']:.0f} miliamper."
+			)
+
+		except Exception as exc:
+			print(
+				"DEVICE STATUS ERROR:",
+				repr(exc),
+				flush=True
+			)
+			answer = "Güç bilgisini şu anda okuyamadım."
+
+	print(
+		"ASSISTANT:",
+		answer,
+		flush=True
+	)
+
+	await asyncio.to_thread(
+		speech.say,
+		answer
+	)
+
+	await asyncio.sleep(
+		SPEECH["ASSISTANT_RESPONSE_PAUSE"]
+	)
+
+	state.empty_turns = 0
+	await asyncio.sleep(0.1)
+	return "continue"
+
+
 async def _handle_robot_move(intent, text, movement, music, speech, music_paused_for_wake, state):
 
 	if not movement:
@@ -850,7 +894,7 @@ async def _handle_chat_fallback(text, assistant, speech, music, music_paused_for
 	return "continue"
 
 
-async def _dispatch_intent(intent, text, state, *, music, speech, movement, assistant, system, local_info, music_paused_for_wake):
+async def _dispatch_intent(intent, text, state, *, music, speech, movement, assistant, system, local_info, music_paused_for_wake, power_monitor=None):
 
 	intent_type = intent["type"]
 
@@ -878,6 +922,9 @@ async def _dispatch_intent(intent, text, state, *, music, speech, movement, assi
 	if intent_type == "audio.volume":
 		return await _handle_audio_volume(intent, text, music, speech, music_paused_for_wake, state)
 
+	if intent_type == "device.status":
+		return await _handle_device_status(power_monitor, speech, state)
+
 	if intent_type == "local.time":
 		return await _handle_local_time(text, local_info, speech, state)
 
@@ -897,7 +944,8 @@ async def run_wake_loop(
 	motor=None,
 	music=None,
 	movement=None,
-	speech=None
+	speech=None,
+	power_monitor=None
 ):
 
 	listener = WakeWordListener(
@@ -1047,7 +1095,7 @@ async def run_wake_loop(
 							state.session_ended = True
 							break
 
-						if music_paused_for_wake and intent["type"] not in ["music.stop", "music.pause", "music.resume", "music.next", "music.previous", "music.genres", "robot.move", "audio.volume"]:
+						if music_paused_for_wake and intent["type"] not in ["music.stop", "music.pause", "music.resume", "music.next", "music.previous", "music.genres", "robot.move", "audio.volume", "device.status"]:
 							await asyncio.to_thread(
 								music.resume
 							)
@@ -1068,7 +1116,8 @@ async def run_wake_loop(
 							assistant=assistant,
 							system=system,
 							local_info=local_info,
-							music_paused_for_wake=music_paused_for_wake
+							music_paused_for_wake=music_paused_for_wake,
+							power_monitor=power_monitor
 						)
 
 						if action == "shutdown":

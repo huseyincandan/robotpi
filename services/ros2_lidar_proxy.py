@@ -5,33 +5,14 @@ from pathlib import Path
 
 class Ros2LidarProxyService:
 
-    def __init__(self, scan_file, sector_deg=30.0, angle_offset_deg=0.0, max_age_seconds=1.5):
+    def __init__(self, scan_file, sector_deg=30.0, max_age_seconds=1.5):
 
         self.scan_file = Path(scan_file)
         self.sector = float(sector_deg)
-        self._angle_offset_deg = self._normalize_degrees(angle_offset_deg)
         self.max_age_seconds = float(max_age_seconds)
         self._last_error = ""
         self._cache = None
         self._cache_mtime = None
-
-    def _normalize_degrees(self, value):
-
-        normalized = float(value) % 360.0
-
-        if normalized > 180.0:
-            normalized -= 360.0
-
-        return normalized
-
-    def get_angle_offset_deg(self):
-
-        return float(self._angle_offset_deg)
-
-    def set_angle_offset_deg(self, offset_deg):
-
-        self._angle_offset_deg = self._normalize_degrees(offset_deg)
-        return float(self._angle_offset_deg)
 
     def _read_scan_payload(self):
 
@@ -81,10 +62,6 @@ class Ros2LidarProxyService:
 
         return False
 
-    def _apply_offset(self, angle_deg):
-
-        return (float(angle_deg) + float(self._angle_offset_deg)) % 360.0
-
     def _sector_min(self, points, center_deg):
 
         minimum = None
@@ -127,25 +104,23 @@ class Ros2LidarProxyService:
             return None
 
         raw_points = payload.get("scan_points") or []
-        transformed_points = []
+        points = []
 
         for item in raw_points:
             if not isinstance(item, (list, tuple)) or len(item) < 2:
                 continue
 
-            angle_deg = self._apply_offset(item[0])
-            distance_cm = float(item[1])
-            transformed_points.append((angle_deg, distance_cm))
+            points.append((float(item[0]), float(item[1])))
 
-        front_cm = self._sector_min(transformed_points, 0.0)
-        left_cm = self._sector_min(transformed_points, 90.0)
-        right_cm = self._sector_min(transformed_points, 270.0)
+        front_cm = self._sector_min(points, 0.0)
+        left_cm = self._sector_min(points, 90.0)
+        right_cm = self._sector_min(points, 270.0)
 
         return {
             "front_cm": front_cm,
             "left_cm": left_cm,
             "right_cm": right_cm,
-            "scan_points": transformed_points,
+            "scan_points": points,
             "timestamp": float(payload.get("timestamp", time.monotonic())),
             "updated_at": float(payload.get("updated_at", time.time()))
         }
