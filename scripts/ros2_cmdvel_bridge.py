@@ -61,24 +61,10 @@ class CmdVelBridge(Node):
         self.odom_vx_variance = max(1e-6, float(args.odom_vx_variance))
         self.odom_vyaw_variance = max(1e-6, float(args.odom_vyaw_variance))
 
-        self.imu_max_age_sec = max(0.1, float(args.imu_max_age_sec))
-        self._imu_last_update_monotonic = None
-
-        self.lidar_odom_correction_enabled = bool(args.lidar_odom_correction_enabled)
-        self.lidar_odom_slip_scale = max(0.0, min(1.0, float(args.lidar_odom_slip_scale)))
-        self._lidar_motion_verified = None
-        self._lidar_last_update_monotonic = None
-
-        self.motor_odom_source_enabled = bool(args.motor_odom_source_enabled)
-        self._motor_x_percent = 0.0
-        self._motor_y_percent = 0.0
-        self._motor_last_update_monotonic = None
-
-        # Real wheel-encoder-derived odom (2026-09-13) - preferred over the
-        # motor-percent estimate below when fresh, since it reflects actual
-        # wheel rotation instead of an assumed speed model. Still can't catch
-        # true slip (spinning wheel, stationary chassis) - lidar correction
-        # above still applies on top of whichever source is used.
+        # Real wheel-encoder-derived odom (2026-09-13, calibrated 2026-09-14) -
+        # the sole odom translation source. Falls back to the last commanded
+        # velocity if encoder data is stale/unavailable (e.g. bridge just
+        # started) so there's always some estimate for the EKF to fuse.
         self.encoder_odom_source_enabled = bool(args.encoder_odom_source_enabled)
         self.encoder_ticks_per_meter = max(1.0, float(args.encoder_ticks_per_meter))
         self.encoder_track_width_m = max(0.01, float(args.encoder_track_width_m))
@@ -120,11 +106,11 @@ class CmdVelBridge(Node):
             self._odom_loop
         )
 
-        # Lidar-based odom slip correction and the motor's actual drive
-        # percentage are both read from the same /imu/motion HTTP response
-        # (gyro_z itself is now polled independently by ros2_imu_bridge.py
-        # and fused by robot_localization's EKF instead of here).
-        if self.lidar_odom_correction_enabled or self.motor_odom_source_enabled:
+        # Encoder tick data (enc_rl/enc_rr) rides along on the same /imu/motion
+        # HTTP response polled by the IMU bridge - fused gyro_z itself is now
+        # read independently by ros2_imu_bridge.py and fused by
+        # robot_localization's EKF instead of here.
+        if self.encoder_odom_source_enabled:
             self.imu_timer = self.create_timer(
                 max(0.02, 1.0 / max(5.0, float(args.imu_rate_hz))),
                 self._imu_loop
@@ -152,30 +138,12 @@ class CmdVelBridge(Node):
             with urllib.request.urlopen(request, timeout=0.2) as response:
                 payload = json.loads(response.read())
         except (urllib.error.URLError, TimeoutError, socket.timeout, ValueError):
-            # Keep last known gyro reading; _odom_loop falls back to commanded
-            # angular velocity once it goes stale (imu_max_age_sec).
+            # Keep last known encoder ticks; _odom_loop falls back to the
+            # commanded velocity once encoder data goes stale (encoder_max_age_sec).
             return
 
         if payload.get("status") != "OK":
             return
-
-        self._imu_last_update_monotonic = time.monotonic()
-
-        # Same HTTP round-trip also carries the motor's lidar omnidirectional
-        # motion-signature verdict (True/False/None). False means the lidar
-        # explicitly saw too little change for the commanded drive (likely
-        # wheel slip); None means no verdict is available yet.
-        if "lidar_motion_verified" in payload:
-            self._lidar_motion_verified = payload.get("lidar_motion_verified")
-            self._lidar_last_update_monotonic = time.monotonic()
-
-        # Motorun o an gercekten uyguladigi y-yuzdesi: kaynak nav2 cmd_vel de
-        # olsa joystick/sesli surus de olsa gercek hareketi bu yansitir, oysa
-        # current_linear sadece /cmd_vel mesajlariyla guncellenir.
-        if "motor_y_percent" in payload:
-            self._motor_x_percent = float(payload.get("motor_x_percent", 0.0))
-            self._motor_y_percent = float(payload.get("motor_y_percent", 0.0))
-            self._motor_last_update_monotonic = time.monotonic()
 
         self._update_encoder_odom(payload)
 
@@ -374,34 +342,10 @@ class CmdVelBridge(Node):
             and self._encoder_last_update_monotonic is not None
             and (time.monotonic() - self._encoder_last_update_monotonic) <= self.encoder_max_age_sec
         ):
-            # Real wheel-tick-derived velocity - most trustworthy source when fresh.
+            # Real wheel-tick-derived velocity - the sole odom translation source
+            # when fresh; otherwise falls back to the last commanded velocity
+            # (current_linear) set above.
             v = self._encoder_v
-        elif (
-            self.motor_odom_source_enabled
-            and self._motor_last_update_monotonic is not None
-            and (time.monotonic() - self._motor_last_update_monotonic) <= self.imu_max_age_sec
-        ):
-            # Joystick/sesli surus /cmd_vel'e hic mesaj yayinlamaz, bu yuzden
-            # current_linear boyle durumlarda hep sifirda kalirdi; motorun
-            # gercek y-yuzdesinden turetilen hiz her surus kaynagi icin dogru.
-            v = (self._motor_y_percent / self.max_drive) * self.max_linear
-
-        if (
-            self.lidar_odom_correction_enabled
-            and abs(v) > 1e-6
-            and self._lidar_motion_verified is False
-            and self._lidar_last_update_monotonic is not None
-            and (time.monotonic() - self._lidar_last_update_monotonic) <= self.imu_max_age_sec
-        ):
-            # No wheel encoders means translation is otherwise fully open-loop.
-            # The lidar explicitly reports too little motion for the commanded
-            # drive (wheel slip on a slippery floor, or a stall) so scale the
-            # velocity used for odom down accordingly. This makes the EKF's
-            # (and therefore Nav2's) pose estimate reflect reality instead of
-            # the ideal commanded motion, so it naturally keeps driving toward
-            # the goal (instead of believing it already arrived) until the
-            # lidar confirms real progress again.
-            v *= self.lidar_odom_slip_scale
 
         odom = Odometry()
         odom.header.stamp = self.get_clock().now().to_msg()
@@ -460,13 +404,9 @@ def parse_args():
     parser.add_argument("--odom-vx-variance", type=float, default=0.01)
     parser.add_argument("--odom-vyaw-variance", type=float, default=0.05)
     parser.add_argument("--imu-rate-hz", type=float, default=20.0)
-    parser.add_argument("--imu-max-age-sec", type=float, default=0.5)
-    parser.add_argument("--lidar-odom-correction-enabled", type=lambda v: str(v).lower() not in ("0", "false", "no"), default=True)
-    parser.add_argument("--lidar-odom-slip-scale", type=float, default=0.35)
-    parser.add_argument("--motor-odom-source-enabled", type=lambda v: str(v).lower() not in ("0", "false", "no"), default=True)
-    parser.add_argument("--encoder-odom-source-enabled", type=lambda v: str(v).lower() not in ("0", "false", "no"), default=False)
-    parser.add_argument("--encoder-ticks-per-meter", type=float, default=1000.0)
-    parser.add_argument("--encoder-track-width-m", type=float, default=0.16)
+    parser.add_argument("--encoder-odom-source-enabled", type=lambda v: str(v).lower() not in ("0", "false", "no"), default=True)
+    parser.add_argument("--encoder-ticks-per-meter", type=float, default=21786.0)
+    parser.add_argument("--encoder-track-width-m", type=float, default=0.243)
     parser.add_argument("--encoder-max-age-sec", type=float, default=0.5)
     parser.add_argument("--ultrasonic-topic", default="/ultrasonic_range")
     parser.add_argument("--ultrasonic-rate-hz", type=float, default=10.0)

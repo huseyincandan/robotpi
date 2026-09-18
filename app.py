@@ -179,8 +179,7 @@ speech = SpeechService()
 try:
     motor = MotorService(
         distance=distance,
-        imu=None,
-        speech=speech
+        imu=None
     )
     print("MOTOR SERVICE READY", flush=True)
 except Exception as exc:
@@ -314,7 +313,6 @@ motor_safety_task = None
 startup_calibration_task = None
 map_jump_watchdog_task = None
 power_safety_task = None
-exploration_liveness_task = None
 _shutdown_lock = threading.Lock()
 _motors_stopped = False
 
@@ -376,43 +374,43 @@ async def start_wake_listener():
     global startup_calibration_task
     global map_jump_watchdog_task
     global power_safety_task
-    global exploration_liveness_task
 
-    try:
-        volume = set_speaker_volume(
-            AUDIO["SPEAKER_STARTUP_VOLUME"]
-        )
-        print(
-            "SPEAKER VOLUME:",
-            volume,
-            flush=True
-        )
+    if bool(AUDIO.get("ENABLED", True)):
+        try:
+            volume = set_speaker_volume(
+                AUDIO["SPEAKER_STARTUP_VOLUME"]
+            )
+            print(
+                "SPEAKER VOLUME:",
+                volume,
+                flush=True
+            )
 
-    except Exception as exc:
-        print(
-            "SPEAKER VOLUME ERROR:",
-            repr(exc),
-            flush=True
-        )
+        except Exception as exc:
+            print(
+                "SPEAKER VOLUME ERROR:",
+                repr(exc),
+                flush=True
+            )
 
-    try:
-        volume = set_microphone_capture_volume(
-            AUDIO["MICROPHONE_STARTUP_VOLUME"]
-        )
-        print(
-            "MICROPHONE CAPTURE VOLUME:",
-            volume,
-            flush=True
-        )
+        try:
+            volume = set_microphone_capture_volume(
+                AUDIO["MICROPHONE_STARTUP_VOLUME"]
+            )
+            print(
+                "MICROPHONE CAPTURE VOLUME:",
+                volume,
+                flush=True
+            )
 
-    except Exception as exc:
-        print(
-            "MICROPHONE VOLUME ERROR:",
-            repr(exc),
-            flush=True
-        )
+        except Exception as exc:
+            print(
+                "MICROPHONE VOLUME ERROR:",
+                repr(exc),
+                flush=True
+            )
 
-    if WAKE["ENABLED"] and movement and getattr(motor, "available", True):
+    if bool(AUDIO.get("ENABLED", True)) and WAKE["ENABLED"] and movement and getattr(motor, "available", True):
         wake_task = asyncio.create_task(
             run_wake_loop(
                 motor=motor,
@@ -455,106 +453,6 @@ async def start_wake_listener():
     ):
         power_safety_task = asyncio.create_task(
             _run_power_safety_watchdog()
-        )
-
-    if (
-        navigator
-        and getattr(motor, "available", True)
-        and bool(MAP.get("ROS2_EXPLORE_LIVENESS_WATCHDOG_ENABLED", True))
-    ):
-        exploration_liveness_task = asyncio.create_task(
-            _run_exploration_liveness_watchdog()
-        )
-
-
-async def _run_exploration_liveness_watchdog():
-
-    idle_since = None
-    last_recovery_at = 0.0
-    idle_seconds = max(
-        2.0,
-        float(MAP.get("ROS2_EXPLORE_IDLE_RECOVERY_SECONDS", 8.0))
-    )
-    cooldown_seconds = max(
-        idle_seconds,
-        float(MAP.get("ROS2_EXPLORE_RECOVERY_COOLDOWN_SECONDS", 20.0))
-    )
-
-    while True:
-        await asyncio.sleep(1.0)
-
-        state = navigator.status()
-        explore_reason = state.get("explore_reason")
-        # 2026-08-30: was gated on explore_reason=="no_frontiers" only, so a
-        # wedged robot with an ACTIVE goal (nav2 still replanning, but
-        # collision_monitor silently zeroing every cmd_vel - see corner-stuck
-        # incident) never tripped this watchdog at all, since explore_reason
-        # stayed "goal_active" the whole time it sat frozen. goal_active is
-        # the normal 99%-of-time state during exploration too, so this relies
-        # entirely on the "stationary for idle_seconds" timer below to avoid
-        # false-triggering on ordinary brief replanning pauses.
-        supervised = (
-            bool(state.get("nav2_running"))
-            and bool(state.get("explore_process_running"))
-            and explore_reason in ("no_frontiers", "goal_active")
-            and bool(state.get("autonomous_recovery_allowed"))
-        )
-        stationary = (
-            abs(float(getattr(motor, "current_x", 0.0))) < 0.5
-            and abs(float(getattr(motor, "current_y", 0.0))) < 0.5
-            and not bool(getattr(motor, "recovering", False))
-        )
-
-        if not supervised or not stationary:
-            idle_since = None
-            continue
-
-        if idle_since is None:
-            idle_since = time.monotonic()
-            continue
-
-        now = time.monotonic()
-        if now - idle_since < idle_seconds or now - last_recovery_at < cooldown_seconds:
-            continue
-
-        front_blocked = await asyncio.to_thread(motor.is_forward_blocked)
-        if not front_blocked:
-            if explore_reason == "no_frontiers":
-                print(
-                    "EXPLORE COMPLETE: no frontiers and forward path is clear",
-                    flush=True
-                )
-            idle_since = None
-            continue
-
-        last_recovery_at = now
-        idle_since = None
-        print(
-            "EXPLORE IDLE RECOVERY:",
-            "no frontiers" if explore_reason == "no_frontiers"
-            else "goal active but stationary (nav2 stuck, e.g. wedged corner)",
-            "while forward path is blocked",
-            flush=True
-        )
-
-        navigator.stop_exploration(cancel_recovery=False)
-        motor.last_block_reason = "forward_block_stall"
-        recovered = await motor.recover_from_stuck(
-            navigator.recovery_cancel_event
-        )
-
-        if not recovered or navigator.recovery_cancel_event.is_set():
-            print(
-                "EXPLORE IDLE RECOVERY: local escape failed; exploration remains stopped",
-                flush=True
-            )
-            continue
-
-        result = await asyncio.to_thread(navigator.start_exploration)
-        print(
-            "EXPLORE IDLE RECOVERY: exploration restart",
-            result,
-            flush=True
         )
 
 
@@ -731,13 +629,6 @@ async def _run_map_jump_watchdog():
     while True:
         await asyncio.sleep(max(0.5, interval))
 
-        recovery_finished_at = getattr(motor, "last_recovery_finished_at", None)
-        recovery_settling = recovery_finished_at is not None and (
-            time.monotonic() - float(recovery_finished_at)
-            < float(MAP.get("MAP_IMU_YAW_DISTURBANCE_GRACE_SECONDS", 3.0))
-        )
-        recovering = bool(getattr(motor, "recovering", False)) or recovery_settling
-
         # Read gyro FIRST (not just as a fallback after a pose-jump fires) - a
         # sustained real nav2/DWB turn (confirmed live: -36%/+36% commanded for
         # 2+ seconds, real gyro ~90-100dps) is exactly the kind of fast, genuine
@@ -751,9 +642,14 @@ async def _run_map_jump_watchdog():
             except Exception as exc:
                 print("MAP JUMP WATCHDOG: gyro read failed:", repr(exc), flush=True)
 
+        robot_moving = (
+            abs(float(getattr(motor, "current_x", 0.0))) >= 0.5
+            or abs(float(getattr(motor, "current_y", 0.0))) >= 0.5
+        )
+
         try:
             jump = mapping.detect_pose_jump(
-                robot_moving=not recovering,
+                robot_moving=robot_moving,
                 gyro_z_dps=gyro_z_dps
             )
         except Exception as exc:
@@ -762,13 +658,6 @@ async def _run_map_jump_watchdog():
 
         if not jump and bool(MAP.get("MAP_IMU_YAW_WATCHDOG_ENABLED", True)) and gyro_z_dps is not None:
             try:
-                robot_moving = (
-                    not recovering
-                    and (
-                        abs(float(getattr(motor, "current_x", 0.0))) >= 0.5
-                        or abs(float(getattr(motor, "current_y", 0.0))) >= 0.5
-                    )
-                )
                 jump = mapping.detect_imu_yaw_divergence(
                     gyro_z_dps,
                     robot_moving=robot_moving
@@ -948,18 +837,6 @@ async def _run_startup_lidar_calibration():
 async def stop_wake_listener():
     global startup_calibration_task
     global power_safety_task
-    global exploration_liveness_task
-
-    if exploration_liveness_task:
-        navigator.recovery_cancel_event.set()
-        motor.stop()
-        exploration_liveness_task.cancel()
-
-        try:
-            await exploration_liveness_task
-
-        except asyncio.CancelledError:
-            pass
 
     if wake_task:
         wake_task.cancel()

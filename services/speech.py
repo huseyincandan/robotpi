@@ -350,6 +350,9 @@ class SpeechService:
 
 	def say_local(self, text):
 
+		if not AUDIO.get("ENABLED", True):
+			return
+
 		with self._audio_lock:
 			self._begin_audio()
 
@@ -377,6 +380,9 @@ class SpeechService:
 		)
 
 	def say_openai(self, text):
+
+		if not AUDIO.get("ENABLED", True):
+			return
 
 		with self._audio_lock:
 			self._begin_audio()

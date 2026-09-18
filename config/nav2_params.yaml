@@ -215,7 +215,7 @@ local_costmap:
       transform_tolerance: 0.5
       # Robot body is ~0.23m front-back x 0.14m wide, centered on base_link.
       footprint: "[[0.115, 0.07], [0.115, -0.07], [-0.115, -0.07], [-0.115, 0.07]]"
-      plugins: ["obstacle_layer", "range_layer", "virtual_obstacle_layer", "inflation_layer"]
+      plugins: ["obstacle_layer", "range_layer", "inflation_layer"]
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
@@ -242,21 +242,6 @@ local_costmap:
         mark_threshold: 0.8
         clear_on_max_reading: true
         input_sensor_type: "ALL"
-      # IMU-flagged obstacles too low for the lidar/ultrasonic to ever see
-      # (see services/motor.py invisible-obstacle detection + config's
-      # ROS2_VIRTUAL_OBSTACLES_*). Mark-only, no clearing/raytracing, so a
-      # normal costmap clear (e.g. Nav2's own recovery) can't erase these.
-      virtual_obstacle_layer:
-        plugin: "nav2_costmap_2d::ObstacleLayer"
-        enabled: true
-        observation_sources: virtual_obstacles
-        virtual_obstacles:
-          topic: /virtual_obstacles
-          clearing: false
-          marking: true
-          data_type: "PointCloud2"
-          max_obstacle_height: 2.0
-          obstacle_max_range: 4.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
@@ -279,7 +264,7 @@ global_costmap:
       transform_tolerance: 0.5
       # Same footprint as local_costmap.
       footprint: "[[0.115, 0.07], [0.115, -0.07], [-0.115, -0.07], [-0.115, 0.07]]"
-      plugins: ["static_layer", "obstacle_layer", "range_layer", "virtual_obstacle_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "range_layer", "inflation_layer"]
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true
@@ -306,17 +291,6 @@ global_costmap:
         mark_threshold: 0.8
         clear_on_max_reading: true
         input_sensor_type: "ALL"
-      virtual_obstacle_layer:
-        plugin: "nav2_costmap_2d::ObstacleLayer"
-        enabled: true
-        observation_sources: virtual_obstacles
-        virtual_obstacles:
-          topic: /virtual_obstacles
-          clearing: false
-          marking: true
-          data_type: "PointCloud2"
-          max_obstacle_height: 2.0
-          obstacle_max_range: 4.5
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true

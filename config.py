@@ -55,58 +55,10 @@ MOTOR = {
     # Manuel/joystick donusler icin ust sinir - nav2 ile ortak, bkz. yukaridaki
     # SHARED_MAX_TURN_PERCENT notu.
     "MAX_TURN_PERCENT": SHARED_MAX_TURN_PERCENT,
-    "LIDAR_VERIFY_ENABLED": True,
-    "LIDAR_VERIFY_INTERVAL_SECONDS": 0.45,
-    "LIDAR_VERIFY_MIN_DELTA_CM_LINEAR": 0.25,
-    "LIDAR_VERIFY_MIN_DELTA_CM_TURN": 0.35,
-    "LIDAR_VERIFY_CONSECUTIVE_MISSES_TO_BOOST": 3,
-    "LIDAR_VERIFY_BOOST_STEP_PERCENT": 4.0,
-    "LIDAR_VERIFY_BOOST_MAX_PERCENT": 25.0,
-    # Koridorlarda duvarlar harekete paralel oldugu icin sektor-minimum mesafesi
-    # kucuk otelemede neredeyse degismiyor; bu yuzden "verified" pratikte hemen
-    # hic True olmuyor. Bu esikte sessizce (IMU sarsintisi olmadan) takilan
-    # bir vaka canli gozlemlendi - IMU tetiklenmeden tek guvenlik agi buydu,
-    # kapali oldugu icin robot hic kurtarmaya girmeden sonsuza kadar bekledi.
-    # Yanlis pozitif riskini azaltmak icin miss esigini de yukselttik.
-    "LIDAR_STALL_RECOVERY_ENABLED": True,
-    "LIDAR_VERIFY_STALL_MISSES_TO_RECOVER": 12,
-    # Ultrasonik engel yuzunden ileri hareket surekli reddedilirse (donus de
-    # dahil, ornegin tekerlek bir esikte tutunamiyorsa), bu kadar saniye sonra
-    # kurtarma manevrasi (geri cekil + don) tetiklenir.
-    "ULTRASONIC_STALL_SECONDS_TO_RECOVER": 6.0,
-    # Ultrasonik esik/zemin yansimasini yakin engel sanabilir. Recovery nedeni
-    # IMU veya lidar stall ise ve on lidar sektoru bu kadar aciksa, dogrulanmis
-    # geri + hizli ileri esik tarifine izin ver. Salt ultrasonic stall'da bypass
-    # edilmez.
-    "RECOVERY_STRAIGHT_PUSH_MIN_LIDAR_FRONT_CM": 70.0,
-    # Alcak esikte ultrasonik zemini gorurken yatay lidar ilerideki acikligi
-    # gorur. Iki sensor arasindaki bu fark yoksa nesneyi duvar kabul et.
-    "RECOVERY_THRESHOLD_MIN_LIDAR_FRONT_CM": 45.0,
-    "RECOVERY_THRESHOLD_SENSOR_GAP_CM": 10.0,
-    "RECOVERY_THRESHOLD_MIN_ULTRASONIC_CM": 50.0,
-    # An IMU stuck event with both the lidar front sector AND the ultrasonic
-    # reading this clear means neither sensor can see whatever is holding the
-    # robot back (e.g. a low table leg below both beams). Nav2's costmap has
-    # no idea it's there either, so its own BT recovery can't route around it
-    # - our own recovery must run regardless of drive source, and the spot
-    # gets marked as a virtual obstacle (see ROS2_VIRTUAL_OBSTACLES_* above).
-    "INVISIBLE_OBSTACLE_MIN_LIDAR_FRONT_CM": 45.0,
-    "INVISIBLE_OBSTACLE_MIN_ULTRASONIC_CM": 30.0,
-    "RECOVERY_LATCH_CLEAR_ULTRASONIC_CM": 50.0,
-    "RECOVERY_LATCH_CLEAR_CONSECUTIVE_SAMPLES": 5,
-    # Ultrasonik engelde ileri bileseni kesilirken Nav2'nin kacis donusunu
-    # surdurmesine izin ver, ancak lidar taramasini bozan yuksek tork darbesi
-    # uretme.
     # Sag arka tekerin daha zayif kaldigi yonu kucuk ve surekli bir taban tork
     # farkiyla telafi et. Darbeli kick SLAM yaw sicramalarina neden oldugu icin
     # tamamen kaldirildi.
-    "RIGHT_TURN_EXTRA_MIN_TURN_PERCENT": 4.0,
-    # 2026-08-31: saf yerinde pivot (y=0, x!=0) manuel/joystick kullaniminda
-    # guvenilmez bulundu (bazen ~0 derece donus) - nav2'nin kendi
-    # FollowPath.min_vel_x=0.04 kacis yontemini taklit ederek, saf pivot
-    # istendiginde kucuk bir ileri kayma enjekte ediyoruz (sadece nav2/explore
-    # disi kaynaklar icin - nav2'nin kendi Spin recovery'si bundan etkilenmemeli).
-    "PURE_PIVOT_FORWARD_CREEP_PERCENT": 30.0
+    "RIGHT_TURN_EXTRA_MIN_TURN_PERCENT": 4.0
 }
 
 LIDAR = {
@@ -221,16 +173,6 @@ IMU = {
     "I2C_READ_MAX_ATTEMPTS": 3,
     "BUS_RETRY_FAULT_COUNT": 2,
     "BUS_RETRY_FAULT_WINDOW_SECONDS": 3.0,
-    # 2026-08-21: elle test edilip esikte basarili oldugu dogrulanan tarif -
-    # ~20cm geri (40% / 1.2s) + ~3s tam guclu duz itis. Degerler bu tarife
-    # gore ayarlandi, degistirmeden once tekrar elle test et.
-    "RECOVERY_BACKUP_SPEED": 40,
-    "RECOVERY_BACKUP_SPEED_MAX": 80,
-    # LIDAR_VERIFY_INTERVAL_SECONDS (0.45s) icin en az bir periyot birakir,
-    # yoksa geri cekilme dogrulanamadan donus/ileri asamasina gecilir.
-    "RECOVERY_BACKUP_SECONDS": 1.2,
-    "RECOVERY_BACKUP_MAX_TRIES": 3,
-    "RECOVERY_BACKUP_MAX_SECONDS": 1.6,
     # Was 45.0, lowered to 20.0 earlier - but 2026-08-30 that let an escalating
     # multi-try backup (up to 80%/1.6s x3, no nav2-style collision-checking of
     # its own) run for ~2m into a low window sill the lidar's current mount
@@ -238,37 +180,7 @@ IMU = {
     # window and wedged itself. Raised back to 40.0 as a safety margin until
     # the lidar mount is physically redesigned/lowered and the rear blind spot
     # is verified fixed. DO NOT re-lower without re-verifying rear FOV first.
-    "RECOVERY_BACKUP_MIN_LIDAR_REAR_CM": 40.0,
-    # 46% (nav2'nin de kullandigi tavan) yerinde donus icin yetersiz kaliyordu -
-    # jiroskop testinde gercek donus olculememisti. Kurtarma kendi tavanini
-    # kullandigi icin bagimsiz olarak yukseltiyoruz.
-    "RECOVERY_TURN_SPEED": 58,
-    "RECOVERY_TURN_HOLD_SPEED": 48,
-    "RECOVERY_TURN_BREAKAWAY_SECONDS": 0.20,
-    "RECOVERY_TURN_SECONDS": 0.75,
-    "RECOVERY_TURN_RAMP_STEP_PERCENT": 5.0,
-    "RECOVERY_TURN_RAMP_INTERVAL_SECONDS": 0.08,
-    # Geri cekilme sonrasinda hem ultrasonik hem lidar onu acik gorurse esik
-    # itisi denenebilir. Itis boyunca ultrasonik stop hicbir zaman bypass edilmez.
-    "RECOVERY_STRAIGHT_PUSH_ENABLED": False,
-    "RECOVERY_STRAIGHT_PUSH_MAX_ATTEMPTS": 2,
-    # Elle test: 0.6s'lik itis esigi sadece kismen aştırıyordu (verified test
-    # yaniltici sekilde "temiz" diyordu); esigi gercekten asmak ~3s surekli
-    # tam guc gerektirdi.
-    "RECOVERY_STRAIGHT_PUSH_SPEED": 95,
-    "RECOVERY_STRAIGHT_PUSH_SECONDS": 2.2,
-    "RECOVERY_FORWARD_TEST_SPEED": 25,
-    # LIDAR_VERIFY_INTERVAL_SECONDS (0.45s) icin en az iki periyot birakir,
-    # yoksa lidar hic dogrulama yapamadan test "temiz" sanip biter.
-    "RECOVERY_FORWARD_TEST_SECONDS": 1.0,
-    "RECOVERY_PAUSE_SECONDS": 0.08,
-    "RECOVERY_MAX_SECONDS": 120,
-    "VOICE_NOTIFICATIONS": True,
-    "VOICE_ATTEMPT_INTERVAL_SECONDS": 8,
-    "VOICE_STUCK_TEXT": "Takıldım. Kurtulmayı deniyorum.",
-    "VOICE_ATTEMPT_TEXT": "Biraz geri gelip yön değiştirmeyi deniyorum.",
-    "VOICE_CLEAR_TEXT": "Kurtuldum, devam ediyorum.",
-    "VOICE_GIVE_UP_TEXT": "Kurtulamadım. Güvenlik için duruyorum."
+    "RECOVERY_BACKUP_MIN_LIDAR_REAR_CM": 40.0
 }
 
 CAMERA = {
@@ -302,36 +214,6 @@ MAP = {
     "ROS2_EXPORT_SCAN_FILE": "live_scan.json",
     "ROS2_EXPORT_SCAN_RATE_HZ": 4.0,
     "ROS2_SCAN_STALE_SECONDS": 15.0,
-    # Low obstacles (table/couch legs) sit below the lidar's scan plane and
-    # the ultrasonic's beam, so neither can ever route around them. When
-    # services/motor.py's IMU stuck-detector fires with no corroborating
-    # lidar/ultrasonic reading, it appends the robot's current map-frame pose
-    # here; this file is republished as a PointCloud2 (see
-    # scripts/ros2_virtual_obstacles.py) into Nav2's costmaps as a
-    # mark-only, non-clearing source, so the planner keeps avoiding that
-    # exact spot even across normal costmap clears.
-    "ROS2_VIRTUAL_OBSTACLES_FILE": "virtual_obstacles.json",
-    "ROS2_VIRTUAL_OBSTACLES_TOPIC": "/virtual_obstacles",
-    "ROS2_VIRTUAL_OBSTACLES_RATE_HZ": 2.0,
-    "ROS2_VIRTUAL_OBSTACLES_RING_RADIUS_M": 0.06,
-    "ROS2_VIRTUAL_OBSTACLES_RING_POINTS": 10,
-    # New marks within this radius of an existing one are treated as the same
-    # obstacle (refreshes its timestamp instead of growing the file forever).
-    "ROS2_VIRTUAL_OBSTACLES_DEDUPE_RADIUS_M": 0.20,
-    "ROS2_VIRTUAL_OBSTACLES_MAX_ENTRIES": 200,
-    # Entries not reconfirmed (re-hit) within this long are dropped on the next
-    # mark_virtual_obstacle() call - guards against slow/gradual SLAM pose
-    # drift (too gradual to trip the pose-jump watchdog's full map reset)
-    # eventually making an old mark's map-frame coordinates meaningless.
-    # A genuinely real obstacle keeps getting re-hit, which refreshes
-    # updated_at and resets this clock, so it never actually expires.
-    "ROS2_VIRTUAL_OBSTACLES_MAX_AGE_SECONDS": 900.0,
-    # A single IMU stuck event can be a false positive (e.g. a momentary
-    # sensor-reading gap during a real, visible wedge). Require the SAME spot
-    # to be hit this many times before it's actually published into Nav2's
-    # costmap, so one borderline detection can't permanently wall off a path
-    # (marks are non-clearing/permanent, so a false positive here is costly).
-    "ROS2_VIRTUAL_OBSTACLES_MIN_HIT_COUNT": 2,
     "ROS2_MOVEMENT_SCAN_MAX_AGE_SECONDS": 2.5,
     "ROS2_AUTOSTART_STACK": True,
     "ROS2_LIDAR_PORT": "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_da358bbe261ef111960cc3e40f0f12f8-if00-port0",
@@ -390,9 +272,6 @@ MAP = {
     "ROS2_EXPLORE_LAUNCH_PACKAGE": "explore_lite",
     "ROS2_EXPLORE_LAUNCH_FILE": "explore.launch.py",
     "ROS2_EXPLORE_PARAMS_FILE": "config/explore_lite_params.yaml",
-    "ROS2_EXPLORE_LIVENESS_WATCHDOG_ENABLED": True,
-    "ROS2_EXPLORE_IDLE_RECOVERY_SECONDS": 8.0,
-    "ROS2_EXPLORE_RECOVERY_COOLDOWN_SECONDS": 20.0,
     "ROS2_CMDVEL_BRIDGE_APP_BASE_URL": "http://127.0.0.1:5000",
     "ROS2_PYTHON_BIN": "~/.micromamba/envs/ros2_jazzy/bin/python3",
     "ROS2_CMDVEL_TOPIC": "/cmd_vel",
@@ -427,65 +306,21 @@ MAP = {
     "ROS2_CMDVEL_ODOM_RATE_HZ": 50.0,
     # Real MPU6050 gyro_z (via GET /imu/motion, polled independently by
     # scripts/ros2_imu_bridge.py) is fused into yaw by robot_localization's
-    # EKF (config/ekf.yaml) instead of the old hand-rolled Euler integration
-    # here - there are no wheel encoders, so gyro_z is the only closed-loop
-    # heading feedback available. Flip ROS2_IMU_GYRO_SIGN if the robot's IMU
-    # mounting reports positive gyro_z for clockwise (right) turns instead of
-    # the REP103 convention (positive = counter-clockwise/left turn).
+    # EKF (config/ekf.yaml) instead of hand-rolled integration here. Flip
+    # ROS2_IMU_GYRO_SIGN if the robot's IMU mounting reports positive gyro_z
+    # for clockwise (right) turns instead of the REP103 convention (positive
+    # = counter-clockwise/left turn).
     "ROS2_IMU_TOPIC": "/imu/data",
     "ROS2_IMU_FRAME": "base_link",
     "ROS2_IMU_RATE_HZ": 50.0,
     "ROS2_IMU_GYRO_SIGN": 1.0,
     "ROS2_IMU_STATIONARY_DEADBAND_DPS": 0.5,
     "ROS2_IMU_GYRO_Z_VARIANCE": 0.02,
-    # There are wheel encoders as of 2026-09-13 (see ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED),
-    # but they can't detect actual wheel slip (a spinning-but-not-moving wheel
-    # still reports rotation) - only translation, not yaw, is derived from them.
-    # When the lidar's
-    # omnidirectional motion signature (see MOTOR.LIDAR_VERIFY_*) reports
-    # insufficient motion for the commanded drive, scale down the linear
-    # velocity used for odom integration so Nav2's own costmap/planner sees
-    # the shortfall and naturally keeps commanding the robot forward instead
-    # of prematurely considering the move complete.
-    "ROS2_CMDVEL_LIDAR_ODOM_CORRECTION_ENABLED": True,
-    "ROS2_CMDVEL_LIDAR_ODOM_SLIP_SCALE": 0.35,
-    # Joystick/sesli surus gibi Nav2 disi surus /cmd_vel'e hic mesaj yayinlamaz,
-    # bu yuzden sadece cmd_vel'e bakarsak odom bu hareketleri kacirir ve harita
-    # guncellenmez. Bunun yerine motorun o an gercekten uyguladigi y-yuzdesini
-    # (kaynak fark etmeksizin, GET /imu/motion uzerinden) kullanarak odom
-    # cevirisini hesapliyoruz.
-    "ROS2_CMDVEL_MOTOR_ODOM_SOURCE_ENABLED": True,
-    # 2026-09-13: gercek tekerlek enkoderleri eklendi (MotorEspS3.ino ENC_RL_A/B,
-    # ENC_RR_A/B, TELEM satirinin son iki alani) - onceden tamamen acik-cevrimli
-    # (komut edilen hiz -> varsayilan model) olan odom cevirisi artik gercek tik
-    # farkindan hesaplanabiliyor. ENCODER_ODOM_SOURCE_ENABLED, MOTOR_ODOM_SOURCE'dan
-    # ONCE denenir (ikisi de acilirsa) - encoder verisi taze degilse otomatik olarak
-    # MOTOR_ODOM_SOURCE_ENABLED yoluna (komut edilen yuzdeye) duser.
-    # KALIBRASYON GEREKLI: asagidaki iki deger henuz olculmedi (PLACEHOLDER).
-    # Olcum yontemi (bu depodaki mevcut "ampirik kalibrasyon" pratigiyle ayni):
-    #   1) ENCODER_TICKS_PER_METER: robotu duz bir zeminde bilinen bir mesafe
-    #      (ör. 1.0m, /map/pose ile olculur) kadar surup /imu/motion'daki
-    #      enc_rl/enc_rr farkinin ortalamasini mesafeye bolun.
-    #      ticks_per_meter = ortalama(delta_enc_rl, delta_enc_rr) / mesafe_m
-    #   2) ENCODER_TRACK_WIDTH_M: robotu yerinde (sabit merkez) N tam tur (ör.
-    #      360 derece) dondurup delta_enc_rl ve delta_enc_rr'nin ZIT isaretli
-    #      farkindan tekerlek cevresi mesafesini hesaplayip aci ile orantilayin:
-    #      track_width_m = (|delta_dist_rl| + |delta_dist_rr|) / aci_rad
-    #   Olcum bitene kadar ENABLED=False birakin (varsayilan hatali sabitlerle
-    #   yanlis odom Nav2'yi yanilmasin diye).
-    # 2026-09-14 ON KALIBRASYON (tek ornekli, kisa mesafe): SLAM pose + enkoder
-    # tik farki kullanilarak /drive?source=manual ile guvenli, kisa (~3.45cm
-    # ileri, ~17.4 derece donus) bir test yapildi (ultrasonik onceki oturumda
-    # "GPIO busy" hatasiyla calismiyordu, app yeniden baslatilarak duzeltildi).
-    # Ileri: delta_enc_rl=723, delta_enc_rr=780, SLAM mesafesi=0.034497m ->
-    #   ticks_per_meter = ortalama(723,780)/0.034497 = ~21786
-    # Donus: delta_enc_rl=-211, delta_enc_rr=+1392, SLAM aci=0.303153 rad ->
-    #   track_width_m = (0.009688+0.063901)/0.303153 = ~0.2428
-    # NOT: 3.45cm cok kisa bir mesafe oldugu icin SLAM pose gurultusune gore
-    # goreli hata payi yuksek olabilir - daha uzun/guvenli bir mesafeyle (once
-    # onden bosluk teyit edilerek) tekrar olcup dogrulamak onerilir. Bu yuzden
-    # ENABLED hala False - deger placeholder'dan gercege yakin ama teyitsiz.
-    "ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED": False,
+    # Real wheel encoders (MotorEspS3.ino ENC_RL_A/B, ENC_RR_A/B, last two
+    # TELEM fields) are the odom translation source, fused by robot_localization's
+    # EKF (config/ekf.yaml). Calibrated 2026-09-14 via SLAM-pose-vs-tick-delta
+    # measurement (see /memories/repo/robotpi_slam_notes.md for method).
+    "ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED": True,
     "ROS2_ENCODER_TICKS_PER_METER": 21786.0,
     "ROS2_ENCODER_TRACK_WIDTH_M": 0.243,
     "ROS2_ENCODER_MAX_AGE_SECONDS": 0.5,
@@ -501,6 +336,22 @@ MAP = {
     "MAP_JUMP_CHECK_INTERVAL_SECONDS": 0.5,
     "MAP_IMU_YAW_WATCHDOG_ENABLED": True,
     "MAP_IMU_YAW_MAX_ERROR_DEG": 40.0,
+    # 2026-09-18: koridorda (hicbir engel yokken) surekli donup durma
+    # olayinin kok nedeni - scan matcher uzun/simetrik gorunumlu koridorda
+    # ~180 derece ters yonlu bir eslesmeyi dogru sanip kilitleniyor (bkz.
+    # config/slam_toolbox_online_async.yaml 2026-09-14 notu), bu da haritayi
+    # bozuyor (starburst) ve nav2'ye koridorda hayali engel gosteriyor -> Spin
+    # recovery -> tekrar hizli donus -> tekrar yanlis eslesme riski (kisir
+    # dongu). Bu tek-ornekli jiroskop/SLAM uyusmazligi ESKIDEN sadece robot
+    # HIZLI DONMUYORKEN kontrol ediliyordu (asagidaki FAST_TURN_DPS penceresi
+    # ve recovery sirasinda tamamen atlaniyordu) - yani tam da bu hatanin en
+    # sik olustugu anda (Spin recovery / hizli donus) izlenmiyordu. Bu esik,
+    # gercek donus hizinin (max_rotational_vel=0.45 rad/s) tek bir lidar
+    # taramasinda (~150-200ms) yol acabilecegi motion-smear farkindan (~5
+    # derece) kat kat buyuk oldugu icin, donus sirasinda bile guvenle "gercek
+    # bir ters-yon atlamasi" olarak sayilabilir - asagidaki FAST_TURN/grace
+    # penceresini BEKLEMEDEN hemen tetiklenir.
+    "MAP_IMU_YAW_GROSS_ERROR_DEG": 45.0,
     "MAP_IMU_YAW_DISTURBANCE_DELTA_DEG": 8.0,
     "MAP_IMU_YAW_DISTURBANCE_GRACE_SECONDS": 3.0,
     # 2026-09-13: lidar tek bir 360 taramayi ~150-200ms'de bitiriyor, hizli
@@ -573,6 +424,10 @@ MOVEMENT = {
 }
 
 AUDIO = {
+    # 2026-09-18: sarj sirasinda guc tuketimini dusurmek icin mikrofon/hoparlor
+    # fonksiyonlari (wake-word dinleme, TTS cikisi, webrtc mikrofon/hoparlor)
+    # gecici olarak kapatildi - ileride tekrar True yapilacak.
+    "ENABLED": False,
     "MICROPHONE_CARD": "ArrayUAC10",
     "MICROPHONE_DEVICE": "dsnoop:CARD=ArrayUAC10,DEV=0",
     "MICROPHONE_FORMAT": "alsa",

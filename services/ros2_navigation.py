@@ -2,7 +2,6 @@ import os
 import shlex
 import signal
 import subprocess
-import threading
 import time
 from pathlib import Path
 
@@ -19,7 +18,6 @@ class Ros2NavigationService:
         self._cmdvel_bridge_process = None
         self._imu_bridge_process = None
         self._ekf_process = None
-        self.recovery_cancel_event = threading.Event()
         self._setup_bash = str(Path(str(MAP.get("ROS2_SETUP_BASH", "~/ros2_ws/install/setup.bash"))).expanduser())
         self._ros_python_bin = str(Path(str(MAP.get("ROS2_PYTHON_BIN", "~/.micromamba/envs/ros2_jazzy/bin/python3"))).expanduser())
         self._ros_bin_dir = str(Path(self._ros_python_bin).resolve().parent)
@@ -258,12 +256,9 @@ class Ros2NavigationService:
         odom_rate_hz = float(MAP.get("ROS2_CMDVEL_ODOM_RATE_HZ", 50.0))
         odom_vx_variance = float(MAP.get("ROS2_ODOM_VX_VARIANCE", 0.01))
         odom_vyaw_variance = float(MAP.get("ROS2_ODOM_VYAW_VARIANCE", 0.05))
-        lidar_odom_correction_enabled = bool(MAP.get("ROS2_CMDVEL_LIDAR_ODOM_CORRECTION_ENABLED", True))
-        lidar_odom_slip_scale = float(MAP.get("ROS2_CMDVEL_LIDAR_ODOM_SLIP_SCALE", 0.35))
-        motor_odom_source_enabled = bool(MAP.get("ROS2_CMDVEL_MOTOR_ODOM_SOURCE_ENABLED", True))
-        encoder_odom_source_enabled = bool(MAP.get("ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED", False))
-        encoder_ticks_per_meter = float(MAP.get("ROS2_ENCODER_TICKS_PER_METER", 1000.0))
-        encoder_track_width_m = float(MAP.get("ROS2_ENCODER_TRACK_WIDTH_M", 0.16))
+        encoder_odom_source_enabled = bool(MAP.get("ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED", True))
+        encoder_ticks_per_meter = float(MAP.get("ROS2_ENCODER_TICKS_PER_METER", 21786.0))
+        encoder_track_width_m = float(MAP.get("ROS2_ENCODER_TRACK_WIDTH_M", 0.243))
         encoder_max_age_sec = float(MAP.get("ROS2_ENCODER_MAX_AGE_SECONDS", 0.5))
 
         if not Path(ros_python_bin).exists():
@@ -297,9 +292,6 @@ class Ros2NavigationService:
             f"--odom-rate-hz {shlex.quote(str(odom_rate_hz))} "
             f"--odom-vx-variance {shlex.quote(str(odom_vx_variance))} "
             f"--odom-vyaw-variance {shlex.quote(str(odom_vyaw_variance))} "
-            f"--lidar-odom-correction-enabled {shlex.quote(str(lidar_odom_correction_enabled))} "
-            f"--lidar-odom-slip-scale {shlex.quote(str(lidar_odom_slip_scale))} "
-            f"--motor-odom-source-enabled {shlex.quote(str(motor_odom_source_enabled))} "
             f"--encoder-odom-source-enabled {shlex.quote(str(encoder_odom_source_enabled))} "
             f"--encoder-ticks-per-meter {shlex.quote(str(encoder_ticks_per_meter))} "
             f"--encoder-track-width-m {shlex.quote(str(encoder_track_width_m))} "
@@ -614,7 +606,6 @@ class Ros2NavigationService:
         if self._explore_process is not None and self._explore_process.poll() is None:
             explore_active, explore_reason = self._exploration_activity()
             if explore_active or explore_reason == "starting":
-                self.recovery_cancel_event.clear()
                 return {
                     "status": "OK",
                     "message": "explore_lite already running",
@@ -678,7 +669,6 @@ class Ros2NavigationService:
 
         self._explore_process = self._spawn_command(shell_cmd)
         time.sleep(0.6)
-        self.recovery_cancel_event.clear()
 
         return {
             "status": "OK",
@@ -687,10 +677,8 @@ class Ros2NavigationService:
             "explore_status": self._status_text(self._explore_process)
         }
 
-    def stop_exploration(self, cancel_recovery=True):
+    def stop_exploration(self):
 
-        if cancel_recovery:
-            self.recovery_cancel_event.set()
         self._terminate_process_group(self._explore_process)
         self._explore_process = None
 
@@ -710,8 +698,7 @@ class Ros2NavigationService:
                 "explore_running": False,
                 "explore_process_running": False,
                 "explore_active": False,
-                "explore_reason": "disabled",
-                "autonomous_recovery_allowed": False
+                "explore_reason": "disabled"
             }
 
         nav2_status = self._status_text(self._nav2_process)
@@ -729,8 +716,7 @@ class Ros2NavigationService:
             "explore_running": explore_status == "running" and explore_active,
             "explore_process_running": explore_status == "running",
             "explore_active": explore_active,
-            "explore_reason": explore_reason,
-            "autonomous_recovery_allowed": not self.recovery_cancel_event.is_set()
+            "explore_reason": explore_reason
         }
 
     def close(self):

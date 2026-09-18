@@ -416,6 +416,7 @@ async def create_answer(
 
         if (
             track.kind == "audio" and
+            AUDIO.get("ENABLED", True) and
             AUDIO.get(
                 "PLAY_BROWSER_AUDIO_ON_ROBOT",
                 False
@@ -450,25 +451,31 @@ async def create_answer(
     else:
         print("VIDEO TRACK SKIPPED")
 
-    try:
-        microphone = LiveMicrophoneTrack()
+    if AUDIO.get("ENABLED", True):
+        try:
+            microphone = LiveMicrophoneTrack()
 
-        audio_players.add(
-            microphone
-        )
+            audio_players.add(
+                microphone
+            )
 
-        pc.addTrack(
-            microphone
-        )
+            pc.addTrack(
+                microphone
+            )
 
+            print(
+                "AUDIO TRACK ADDED"
+            )
+
+        except Exception as exc:
+            print(
+                "AUDIO INPUT FAILED:",
+                exc
+            )
+
+    else:
         print(
-            "AUDIO TRACK ADDED"
-        )
-
-    except Exception as exc:
-        print(
-            "AUDIO INPUT FAILED:",
-            exc
+            "AUDIO TRACK SKIPPED (AUDIO.ENABLED=False)"
         )
 
     #################################################
