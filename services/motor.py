@@ -413,10 +413,15 @@ class MotorService:
                     minimum_speed_percent=minimum_speed_percent
                 )
             else:
+                nav_source = str(source).strip().lower() in {"nav2", "explore", "ros2"}
                 minimum_speed = (
                     float(minimum_speed_percent)
                     if minimum_speed_percent is not None
-                    else float(ULTRASONIC["MIN_FORWARD_SPEED_PERCENT"])
+                    else float(
+                        MOTOR.get("NAV2_MIN_FORWARD_PERCENT", ULTRASONIC["MIN_FORWARD_SPEED_PERCENT"])
+                        if nav_source
+                        else ULTRASONIC["MIN_FORWARD_SPEED_PERCENT"]
+                    )
                 )
 
                 if y < minimum_speed:

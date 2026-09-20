@@ -50,6 +50,11 @@ ULTRASONIC = {
 }
 
 MOTOR = {
+    # Live 2026-09-20 breakaway test: 12% commanded PWM held the chassis
+    # still; 18% started a real forward roll.  This is deliberately separate
+    # from manual/ultrasonic minimum speed because it calibrates Nav2's
+    # cmd_vel-to-motor path.
+    "NAV2_MIN_FORWARD_PERCENT": 18.0,
     # Manuel/joystick donusler icin ust sinir - nav2 ile ortak, bkz. yukaridaki
     # SHARED_MAX_TURN_PERCENT notu.
     "MAX_TURN_PERCENT": SHARED_MAX_TURN_PERCENT

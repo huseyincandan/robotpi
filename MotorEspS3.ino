@@ -244,12 +244,15 @@ void motorWrite(const Motor &m, int speed) {
 
 // vx: ileri(+)/geri(-), omega: saat yonu(+)/tersi(-); hepsi -255..255
 // Klasik 2 tekerlekli diferansiyel surus: sol=vx-omega, sag=vx+omega.
-void driveTank(int vx, int omega) {
+// Pi/Nav2 commands already close their yaw loop using the IMU/EKF.  Applying
+// this older firmware gyro trim to them creates an unrequested omega even for
+// a Pi "DRIVE vx 0" command, so retain it only for the direct web joystick.
+void driveTank(int vx, int omega, bool applyStraightGyroCorrection = true) {
   // Sadece "duz git" niyetinde (omega=0, komutlu donus yok) gyro duzeltmesi
   // uygula; donus komutu varken (nav2 spin dahil) karismasin diye omega!=0
   // durumuna hic dokunulmuyor.
   int correctedOmega = omega;
-  if (omega == 0 && vx != 0 && gyroBiasReady && mpuReady) {
+  if (applyStraightGyroCorrection && omega == 0 && vx != 0 && gyroBiasReady && mpuReady) {
     float ax, ay, az, gx, gy, gz;
     if (mpuReadMotion(ax, ay, az, gx, gy, gz)) {
       float gzError = gz - gyroBiasZ;
@@ -759,14 +762,14 @@ void handlePiCommand(String line, Stream &out) {
     if (sp2 == -1) { out.println("ERR eksik parametre"); return; }
     int vx = constrain(rest.substring(0, sp2).toInt(), -255, 255);
     int omega = constrain(rest.substring(sp2 + 1).toInt(), -255, 255);
-    driveTank(vx, omega);
+    driveTank(vx, omega, false);
     out.println("OK");
   } else if (cmd == "FWD" || cmd == "BWD" || cmd == "LEFT" || cmd == "RIGHT") {
     int speed = rest.length() ? constrain(rest.toInt(), 0, 255) : WEB_SPEED;
-    if (cmd == "FWD") driveTank(speed, 0);
-    else if (cmd == "BWD") driveTank(-speed, 0);
-    else if (cmd == "LEFT") driveTank(0, -speed);
-    else driveTank(0, speed); // RIGHT
+    if (cmd == "FWD") driveTank(speed, 0, false);
+    else if (cmd == "BWD") driveTank(-speed, 0, false);
+    else if (cmd == "LEFT") driveTank(0, -speed, false);
+    else driveTank(0, speed, false); // RIGHT
     out.println("OK");
   } else if (cmd == "SET") {
     int sp2 = rest.indexOf(' ');

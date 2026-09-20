@@ -73,8 +73,11 @@ controller_server:
       debug_trajectory_details: false
       # Frontier centroids do not have a useful final heading. Keep a small
       # forward component while steering so route progress wins over pivots.
-      min_vel_x: 0.03
-      max_vel_x: 0.24
+      # 18% is the measured breakaway command; with the bridge's 22.8% at
+      # 0.144 m/s mapping that is 0.114 m/s.  Keep DWB's model inside the
+      # actual motor range instead of planning velocities the bridge clips.
+      min_vel_x: 0.114
+      max_vel_x: 0.144
       # Lowered from 1.0/1.2 for calmer normal-wander turning.
       # 2026-09-19: was 0.45 - cmdvel_bridge clamps the real output turn
       # percent to ROS2_NAV2_MAX_TURN_PERCENT (config.py) regardless of what
@@ -84,7 +87,7 @@ controller_server:
       # match the new physical cap so trajectory simulation reflects reality.
       max_vel_theta: 0.12
       min_speed_xy: 0.0
-      max_speed_xy: 0.24
+      max_speed_xy: 0.144
       min_speed_theta: 0.0
       acc_lim_x: 0.35
       acc_lim_theta: 0.2
@@ -288,9 +291,9 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    # Matches the calmer FollowPath/DWB limits above for smoother normal wander.
-    max_velocity: [0.24, 0.0, 0.45]
-    min_velocity: [-0.24, 0.0, -0.45]
+    # Matches the physically achievable FollowPath/DWB limits above.
+    max_velocity: [0.144, 0.0, 0.12]
+    min_velocity: [-0.144, 0.0, -0.12]
     max_accel: [0.35, 0.0, 0.45]
     max_decel: [-0.35, 0.0, -0.45]
     odom_topic: "odom"
