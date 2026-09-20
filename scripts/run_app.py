@@ -39,6 +39,10 @@ def main():
             APP["HOST"],
             "--port",
             str(APP["PORT"]),
+            # ROS bridges poll local sensor endpoints at 50 Hz.  Their HTTP
+            # access records are expected traffic, not actionable app logs;
+            # keep the manual launcher terminal readable for startup/errors.
+            "--no-access-log",
         ],
     )
 

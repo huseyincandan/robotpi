@@ -917,5 +917,8 @@ if __name__ == "__main__":
         app,
         host=APP["HOST"],
         port=APP["PORT"],
-        reload=False
+        reload=False,
+        # The canonical launcher disables these too: ROS bridge polling is
+        # high-frequency normal traffic and should not obscure real logs.
+        access_log=False
     )
