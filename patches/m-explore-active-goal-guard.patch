@@ -1,0 +1,21 @@
+diff --git a/explore/src/explore.cpp b/explore/src/explore.cpp
+index 5cfb2f5..0000000 100644
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -229,4 +229,15 @@
+ 
+ void Explore::makePlan()
+ {
++  // A live NavigateToPose goal owns the route until it succeeds, fails, or is
++  // cancelled.  Re-ranking frontiers on every planner timer tick can select a
++  // different centroid and async_send_goal() then preempts Nav2's in-flight
++  // FollowPath action.  That produced the observed 10-second route changes.
++  // Local obstacle avoidance and Nav2 recovery continue independently while
++  // this guard is active.
++  if (goal_active_) {
++    RCLCPP_DEBUG(logger_, "Navigation goal active; deferring frontier reselection");
++    return;
++  }
++
+   // find frontiers
+   auto pose = costmap_client_.getRobotPose();
