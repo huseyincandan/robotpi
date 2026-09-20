@@ -75,9 +75,15 @@ class Ros2SlamService:
             raise RuntimeError(f"ROS2 scan exporter script not found: {scan_exporter_script}")
 
         preflight_cmd = (
+            # A manual terminal normally has only the app venv activated.
+            # Match the ROS child-process environment below instead of relying
+            # on its system python3 to happen to import rclpy.
+            f"export PATH={shlex.quote(self._ros_bin_dir)}:$PATH && "
+            f"export LD_LIBRARY_PATH={shlex.quote(self._ros_lib_dir)}:$LD_LIBRARY_PATH && "
+            f"export RMW_IMPLEMENTATION={shlex.quote(self._rmw_implementation)} && "
             f"source {shlex.quote(setup_bash)} >/dev/null 2>&1 && "
             "command -v ros2 >/dev/null 2>&1 && "
-            "python3 -c 'import rclpy'"
+            f"{shlex.quote(ros_python_bin)} -c 'import rclpy'"
         )
 
         preflight = subprocess.run(
