@@ -25,56 +25,32 @@
      was being passed straight to FollowPath, and PathAlign closely tracking
      its 0.05m-cell stairsteps down a corridor looked like excessive
      side-to-side reorientation instead of a direct run.
-  4) 2026-09-17: RateController hz was 1.0 (stock nav2 default). Live nav2 log
-     showed [follow_path][ActionServer] Aborting handle firing every ~1s
-     CONTINUOUSLY (125 times over one run, unrelated to whether the robot was
-     actually stuck) - every RateController tick recomputes a path with tiny
-     float differences even when almost nothing changed, and nav2's FollowPath
-     BT node treats any path-port change as a goal update, cancelling and
-     resending the FollowPath action every single time. With acc_lim_x=0.35
-     (0.24 m/s max_vel_x takes ~0.7s to reach), restarting the goal every 1s
-     never let DWB hold a steady speed - most cycles were spent ramping up
-     again from near-zero, which starved SimpleProgressChecker (0.05m/45s) of
-     real movement especially while maneuvering near a close obstacle (a couch
- corner at front_cm~18/right_cm~12 stalled the robot for 25s with zero net
- translation). Slowed to 0.3 (~3.3s cadence) so FollowPath gets real
- uninterrupted time to build speed and make progress between replans.
-  5) 2026-09-18: 0.3 (~3.3s cadence) was NOT enough - live in a wide open
-     corridor (no nearby obstacles, plenty of room to drive straight), nav2 log
-     still showed [follow_path] Aborting handle -> "Cancellation was
-     successful. Stopping the robot." firing every ~3.3-3.4s CONTINUOUSLY for
-     the entire run (confirmed via /tmp/robotpi_nav2.log grep), and /drive
-     calls from source=nav2 showed x ramping down to 0 every cycle
-     (12.4->9.0->5.6->2.18->0.0) i.e. a real full stop, not just log noise.
-     Each ~3.3s cycle is consumed by decel-to-zero + reorient to the newly
-     computed path's start heading + accel back up, leaving almost no time to
-     actually cruise - this matches the user's observed "biraz dön, biraz
-     dur, belki biraz ilerle, sonra tekrar dön" pattern exactly, even in open
-     space with zero obstacle-avoidance need. Slowed further to 0.1 (~10s
-     cadence) so FollowPath gets ~3x longer uninterrupted runs; local costmap/
-     DWB obstacle avoidance still runs at controller_frequency=8.0 regardless
-     of this value, so safety reaction time to real obstacles is unaffected -
-     only how often the GLOBAL path (and thus FollowPath's goal) gets
-     needlessly recomputed/restarted on an otherwise-clear corridor.
+  4) A PipelineSequence re-ticks its planner branch while FollowPath is
+     running.  The RateController only reduced that re-plan rate: every tick
+     still overwrote {path}, which Nav2 treats as a new FollowPath action and
+     visibly aborts/stops the current controller action.  A normal Sequence
+     plans and smooths once per navigation goal, then lets FollowPath run
+     continuously.  Global replanning now occurs after a controller/planner
+     failure and its recovery, or when explore_lite submits a new frontier.
+     The local costmap and DWB controller remain active at their normal rate,
+     so obstacle avoidance is not delayed.
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
     <RecoveryNode number_of_retries="6" name="NavigateRecovery">
-      <PipelineSequence name="NavigateWithReplanning">
+      <Sequence name="NavigateOnceThenFollow">
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
-        <RateController hz="0.1">
-          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
-            <Sequence>
-              <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
-              <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="SimpleSmoother"/>
-            </Sequence>
-            <Sequence>
-              <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
-              <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
-            </Sequence>
-          </RecoveryNode>
-        </RateController>
+        <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+          <Sequence>
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+            <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="SimpleSmoother"/>
+          </Sequence>
+          <Sequence>
+            <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+        </RecoveryNode>
         <RecoveryNode number_of_retries="1" name="FollowPath">
           <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
           <Sequence>
@@ -82,7 +58,7 @@
             <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
           </Sequence>
         </RecoveryNode>
-      </PipelineSequence>
+      </Sequence>
       <Sequence>
         <Fallback>
           <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>

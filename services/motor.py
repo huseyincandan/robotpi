@@ -666,9 +666,20 @@ class MotorService:
             stuck_event = None
 
             if driving_forward:
+                # Keep the command's source semantics when refreshing it for
+                # the continuous forward safety check.  In particular, Nav2
+                # commands bypass the manual ultrasonic slowdown path and are
+                # clamped to MIN_FORWARD_SPEED_PERCENT in drive().  Calling
+                # drive() without these values used the manual path instead;
+                # a 4.75% Nav2 request was then re-sent as ~4% every 50 ms,
+                # overwriting the 12% breakaway command that the original
+                # /drive?source=nav2 request had correctly produced.
+                source = self.last_drive_source
                 self.drive(
                     self.last_requested_x,
-                    self.last_requested_y
+                    self.last_requested_y,
+                    use_forward_safety=source not in {"nav2", "explore", "ros2"},
+                    source=source
                 )
 
                 stuck_event = await asyncio.to_thread(
