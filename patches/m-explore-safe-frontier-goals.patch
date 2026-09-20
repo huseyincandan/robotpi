@@ -1,0 +1,104 @@
+diff --git a/explore/include/explore/explore.h b/explore/include/explore/explore.h
+--- a/explore/include/explore/explore.h
++++ b/explore/include/explore/explore.h
+@@ -139,7 +139,7 @@ private:
+ 
+   // parameters
+   double planner_frequency_;
+-  double potential_scale_, orientation_scale_, gain_scale_;
++  double potential_scale_, orientation_scale_, gain_scale_, min_goal_distance_, frontier_goal_standoff_;
+   double progress_timeout_;
+   bool visualize_;
+   bool return_to_init_;
+diff --git a/explore/src/explore.cpp b/explore/src/explore.cpp
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -56,6 +56,8 @@ Explore::Explore()
+   this->declare_parameter<float>("gain_scale", 1.0);
+   this->declare_parameter<float>("min_frontier_size", 0.5);
+   this->declare_parameter<bool>("return_to_init", false);
++  this->declare_parameter<float>("min_goal_distance", 0.45);
++  this->declare_parameter<float>("frontier_goal_standoff", 0.35);
+ 
+   this->get_parameter("planner_frequency", planner_frequency_);
+   this->get_parameter("progress_timeout", timeout);
+@@ -65,6 +67,8 @@ Explore::Explore()
+   this->get_parameter("gain_scale", gain_scale_);
+   this->get_parameter("min_frontier_size", min_frontier_size);
+   this->get_parameter("return_to_init", return_to_init_);
++  this->get_parameter("min_goal_distance", min_goal_distance_);
++  this->get_parameter("frontier_goal_standoff", frontier_goal_standoff_);
+   this->get_parameter("robot_base_frame", robot_base_frame_);
+ 
+   progress_timeout_ = timeout;
+@@ -269,20 +273,36 @@ void Explore::makePlan()
+   }
+ 
+   // find non blacklisted frontier
+-  auto frontier =
+-      std::find_if_not(frontiers.begin(), frontiers.end(),
+-                       [this](const frontier_exploration::Frontier& f) {
+-                         return goalOnBlacklist(f.centroid);
+-                       });
++  // A frontier centroid is on the unknown side of a free/unknown boundary.
++  // Sending that point directly gives Nav2 a goal in an inflated edge cell.
++  // It also permits tiny, sub-breakaway goals (observed at 0.15 m), which
++  // make this differential-drive robot rotate in place instead of exploring.
++  // Choose the nearest point on a suitable frontier, then stop short on the
++  // already-known free side of that boundary.
++  auto frontier = std::find_if_not(
++      frontiers.begin(), frontiers.end(),
++      [this](const frontier_exploration::Frontier& f) {
++        return goalOnBlacklist(f.centroid) ||
++               f.min_distance < min_goal_distance_ + frontier_goal_standoff_;
++      });
+   if (frontier == frontiers.end()) {
+-    RCLCPP_WARN(logger_, "All frontiers traversed/tried out, stopping.");
+-    auto status_msg = explore_lite_msgs::msg::ExploreStatus();
+-    status_msg.status = explore_lite_msgs::msg::ExploreStatus::EXPLORATION_COMPLETE;
+-    status_pub_->publish(status_msg);
+-    stop(true);
++    RCLCPP_DEBUG(logger_,
++                 "No safe frontier yet (need %.2f m from boundary); waiting for map update.",
++                 min_goal_distance_ + frontier_goal_standoff_);
+     return;
+   }
+-  geometry_msgs::msg::Point target_position = frontier->centroid;
++
++  geometry_msgs::msg::Point target_position = frontier->middle;
++  const double dx = target_position.x - pose.position.x;
++  const double dy = target_position.y - pose.position.y;
++  const double distance_to_boundary = std::hypot(dx, dy);
++  target_position.x -= frontier_goal_standoff_ * dx / distance_to_boundary;
++  target_position.y -= frontier_goal_standoff_ * dy / distance_to_boundary;
++
++  RCLCPP_DEBUG(logger_,
++               "Selected safe frontier: boundary=%.2f m, target=%.2f m, standoff=%.2f m",
++               distance_to_boundary, distance_to_boundary - frontier_goal_standoff_,
++               frontier_goal_standoff_);
+ 
+   // time out if we are not making any progress
+   bool same_goal = same_point(prev_goal_, target_position);
+@@ -329,5 +356,10 @@ void Explore::makePlan()
+   auto goal = nav2_msgs::action::NavigateToPose::Goal();
+   goal.pose.pose.position = target_position;
+-  goal.pose.pose.orientation.w = 1.;
++  // Frontier points have no intrinsic final yaw.  Preserve the useful travel
++  // heading instead of imposing map yaw 0, which previously triggered a
++  // large in-place spin after every short goal.
++  const double target_yaw = std::atan2(dy, dx);
++  goal.pose.pose.orientation.z = std::sin(target_yaw / 2.0);
++  goal.pose.pose.orientation.w = std::cos(target_yaw / 2.0);
+   goal.pose.header.frame_id = costmap_client_.getGlobalFrameID();
+   goal.pose.header.stamp = this->now();
+@@ -356,8 +388,8 @@ void Explore::makePlan()
+ 
+   send_goal_options.result_callback =
+       [this,
+-       target_position](const NavigationGoalHandle::WrappedResult& result) {
+-        reachedGoal(result, target_position);
++       frontier](const NavigationGoalHandle::WrappedResult& result) {
++        reachedGoal(result, frontier->centroid);
+       };
+   move_base_client_->async_send_goal(goal, send_goal_options);
+ }

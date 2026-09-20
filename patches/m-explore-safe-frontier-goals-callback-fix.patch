@@ -1,0 +1,14 @@
+diff --git a/explore/src/explore.cpp b/explore/src/explore.cpp
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -360,8 +360,8 @@ void Explore::makePlan()
+ 
+   send_goal_options.result_callback =
+       [this,
+-       frontier](const NavigationGoalHandle::WrappedResult& result) {
+-        reachedGoal(result, frontier->centroid);
++       frontier_goal = frontier->centroid](const NavigationGoalHandle::WrappedResult& result) {
++        reachedGoal(result, frontier_goal);
+       };
+   move_base_client_->async_send_goal(goal, send_goal_options);
+ }

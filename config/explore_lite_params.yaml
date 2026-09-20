@@ -29,6 +29,11 @@
     # The patched completion callback waits for this timer so fresh map data
     # is available before selecting the next frontier.
     planner_frequency: 0.1
+    # Ignore map-warmup fragments closer than the usable travel distance. The
+    # patched explorer sends the goal this far back on the known-free side of
+    # the frontier, rather than into an inflated wall/corner boundary cell.
+    min_goal_distance: 0.45
+    frontier_goal_standoff: 0.35
     # Was 45.0, matching nav2 controller_server's own movement_time_allowance
     # (also 45.0). That made the two timeouts a race: explore_lite's own
     # progress watchdog fired within ~1s of nav2's "Failed to make progress",
