@@ -422,6 +422,17 @@ class Ros2SlamService:
         # no obstruction produced a badly corrupted map but zero watchdog log
         # lines, because every relevant sample landed inside a suppressed
         # fast-turn or recovery window).
+        # 2026-09-19 correction: the "~5 deg of real smear" estimate above
+        # assumed max real rotation stays near max_rotational_vel (0.45 rad/s).
+        # Live gyro measurement this session disproved that - ordinary
+        # nav2-commanded turns routinely hit 35-70+ deg/s and up to ~90-100
+        # deg/s at the turn-percent ceiling (a single ~150-200ms lidar sweep
+        # can smear ~13-20 deg of real heading at those rates). This raises
+        # (not lowers) the odds of a genuine scan-matcher ambiguity during a
+        # fast turn in a feature-poor space - see the coarse_search_angle_offset
+        # narrowing in config/slam_toolbox_online_async.yaml, the actual
+        # mitigation attempt for this. The gross-error check here stays
+        # unconditional regardless - it is the safety net, not the fix.
         gross_error = math.radians(float(MAP.get("MAP_IMU_YAW_GROSS_ERROR_DEG", 45.0)))
         if abs(instantaneous_error) >= gross_error:
             return {

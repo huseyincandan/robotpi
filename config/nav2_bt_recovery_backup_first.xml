@@ -2,9 +2,11 @@
   Based on nav2_bt_navigator's stock navigate_to_pose_w_replanning_and_recovery.xml,
   with two changes vs stock:
   1) RoundRobin recovery order is BackUp -> Spin -> Wait instead of Spin -> Wait
-     -> BackUp, since a pure in-place Spin can't generate clearance on this 4WD
-     skid-steer chassis when wedged, and BackUp is what actually creates room to
-     move (matches services/motor.py's own hardware-validated recovery order).
+     -> BackUp: a pure in-place Spin doesn't create any clearance when wedged
+     against an obstacle, while BackUp actually creates room to move (matches
+     services/motor.py's own hardware-validated recovery order). Not chassis-
+     specific - kept as-is after the 2026-09-05 rebuild to 2-wheel diff-drive
+     + front caster.
   2) The stock ReactiveFallback wraps RecoveryActions behind a GoalUpdated check,
      which returns SUCCESS (skipping RecoveryActions entirely) the instant the
      blackboard goal changes. explore_lite sends a new goal within the same tick

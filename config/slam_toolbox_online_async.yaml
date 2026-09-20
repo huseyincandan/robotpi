@@ -96,16 +96,37 @@ slam_toolbox:
 
     # 2026-09-14: both raised (0.5/1.0) alongside the smear_deviation change
     # above - these penalize a candidate match the further it sits from the
-    # odometry-predicted pose. A real 175deg/<1s flip is physically impossible
-    # for this chassis (max_vel_theta 0.45 rad/s), so odometry should never
-    # predict anywhere near it; raising these penalties makes the matcher
-    # trust odometry continuity more and reject a same-score-but-flipped
-    # candidate instead of jumping to it.
+    # odometry-predicted pose, making the matcher trust odometry continuity
+    # more and reject a same-score-but-flipped candidate instead of jumping
+    # to it.
+    # 2026-09-19 correction: the "physically impossible above max_vel_theta
+    # 0.45 rad/s (25.8 deg/s)" assumption behind this whole tuning section
+    # was live-measured and disproven this session - real gyro readings
+    # during ordinary nav2-commanded turns (well below the motor-percent
+    # ceiling) routinely hit 35-70+ deg/s, and 90-100 deg/s at the actual
+    # turn-percent ceiling (see /memories/repo/robotpi_slam_notes.md). The
+    # fused odom yaw RATE is still trustworthy (EKF fuses real MPU6050
+    # gyro_z for yaw, not the separately-buggy encoder-derived estimate), so
+    # tightening the search space around that prior (rather than assuming a
+    # slow max speed) is still the right lever - see coarse_search_angle_offset
+    # below, narrowed for the same reason.
     distance_variance_penalty: 1.0
     angle_variance_penalty: 3.0
 
     fine_search_angle_offset: 0.00349
-    coarse_search_angle_offset: 0.349
+    # 2026-09-19: was 0.349 (20deg) - with real turns hitting 35-100+ deg/s
+    # (see note above), a coarse search this wide still lets a ~40-90deg-off
+    # (wrong-orientation) candidate be considered and occasionally win in a
+    # feature-poor/symmetric space (3 gross MAP JUMP WATCHDOG events in one
+    # ~3min run were observed at this setting). The odometry prior's yaw rate
+    # comes straight from the real gyro (see above), so it should already be
+    # accurate within a much smaller margin than 20deg over one scan-match
+    # step; narrowing this to bound out those far-off candidates instead of
+    # only penalizing them. NEEDS a live in-motion validation pass (repeat the
+    # explore/wander test and watch for MAP JUMP WATCHDOG triggers) before
+    # trusting it fully - revert to 0.349 if legitimate fast turns start
+    # producing scan-match dropouts/holes instead.
+    coarse_search_angle_offset: 0.2
     coarse_angle_resolution: 0.0349
     minimum_angle_penalty: 0.9
     minimum_distance_penalty: 0.5

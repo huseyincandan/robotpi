@@ -1,7 +1,9 @@
 /**:
   ros__parameters:
     robot_base_frame: base_link
-    return_to_init: true
+    # Finish at the last useful frontier; do not create an unexpected route
+    # back through already-mapped space.
+    return_to_init: false
     costmap_topic: /map
     costmap_updates_topic: /map_updates
     visualize: true
@@ -24,7 +26,9 @@
     # entirely. Slowed further so each goal gets real uninterrupted time to
     # either finish or genuinely fail on its own instead of being preempted
     # out from under it; reduces how often this race can even be triggered.
-    planner_frequency: 0.05
+    # The patched completion callback waits for this timer so fresh map data
+    # is available before selecting the next frontier.
+    planner_frequency: 0.1
     # Was 45.0, matching nav2 controller_server's own movement_time_allowance
     # (also 45.0). That made the two timeouts a race: explore_lite's own
     # progress watchdog fired within ~1s of nav2's "Failed to make progress",

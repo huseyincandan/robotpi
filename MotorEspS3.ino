@@ -125,6 +125,15 @@ const uint8_t INA_REG_CONFIG = 0x00;
 const uint8_t INA_REG_SHUNT_VOLTAGE = 0x01;
 const uint8_t INA_REG_BUS_VOLTAGE = 0x02;
 
+// Pi tarafindaki config.py POWER_MONITOR degerleriyle ayni (SHUNT_OHMS,
+// MIN/MAX_VOLTAGE, LOW_VOLTAGE_WARNING) - /power buradan hesaplanan yuzde/akim
+// Pi'nin web arayuzunde gosterdigiyle ayni cikmasi icin bu degerler senkron
+// tutulmali.
+const float BATTERY_SHUNT_OHMS = 0.1f;
+const float BATTERY_MIN_VOLTAGE = 9.9f;
+const float BATTERY_MAX_VOLTAGE = 12.6f;
+const float BATTERY_LOW_VOLTAGE_WARNING = 10.5f;
+
 // 2026-09-06 test: kesik kesik surus sorununun I2C telemetri okumasindan
 // (MPU6050/INA219) kaynaklanip kaynaklanmadigini izole etmek icin gecici
 // kapatma anahtari - I2C okumasi sorunun nedeni OLMADIGI test edilerek
@@ -225,66 +234,8 @@ void motorInit(const Motor &m) {
 }
 
 // speed: -255 (full reverse) .. 255 (full forward)
-const int MIN_EFFECTIVE_SPEED = 60; // bu esigin altindaki komutlar surtunmeyi yenip motoru fiilen cevirmeyebilir
-// Yerinde donuste/yana kaymada 4 tekerlek de birden rulo/yanal surtunmeyi
-// yenmek zorunda - bu, duz gitmekten cok daha fazla tork ister. MIN_EFFECTIVE_SPEED
-// bunun icin yetersiz kaliyordu: nav2 dis=0 omega!=0 komutu gonderiyor, gyro
-// donusun gerceklesmedigini gosteriyor, robot hicbir yere hareket etmiyordu.
-// Tekerlek basina surtunme/agirlik dagilimi esit degil - 2026-08-30 gozlemi:
-// donus baslarken bazen sadece en dusuk surtunmeli tek teker donup patinaj
-// yapiyor, digerleri statik surtunmeyi yenemiyor, net donus olmuyor.
-// 2026-08-31: floor 130->150, sonra breakaway gucu 220->240 yukseltildi, ama
-// guc sadece ilk PIVOT_BREAKAWAY_MS suresince uygulanip sonra dusuruluyordu.
-// 2026-08-31 (later): kullanici hala patinaj bildirdi - breakaway suresi
-// dolunca guc dusunce bazi (agir yuklu/yuksek surtunkeli) tekerlekler donmeye
-// devam edemiyor, tekrar surunmeye/patinaja donuyordu. Zaman asimi tamamen
-// kaldirildi: donus (pivot-like) suregeldigi surece PIVOT_BREAKAWAY_SPEED
-// butun sure boyunca uygulanir, sadece donus bitince normal guce donulur.
-// 2026-09-05: mecanum yana kayma (vy) kaldirildi - artik sadece vx/omega var.
-// 2026-09-05 (later): normal tekerlere + on sarhos tekere gecilince 240 (~%94)
-// artik asiri agresif kaldi - mecanum rulolarin dusuk tutunmasi icin
-// yukseltilmisti, gercek lastikler cok daha iyi tutunuyor. Ilk nav2/explore
-// donus komutunda robot sert ve hizli tam tur atti. Guvenli baslangic icin
-// dusuruldu - gerekirse tekrar canli test ederek ayarlanabilir.
-const int PIVOT_BREAKAWAY_SPEED = 110;
-
-bool isPivotLike(int vx, int omega) {
-  return omega != 0 && abs(omega) > abs(vx);
-}
-
-// 2026-09-05 (later still): PIVOT_BREAKAWAY_SPEED'in donus SUREGELDIGI SURECE
-// sabit uygulanmasi (bkz. yukaridaki 2026-08-31 notu) mecanum tekerlerin dusuk
-// tutunmasi icin gerekliydi, ama nav2'nin DWB planlayicisi kendi
-// max_vel_theta/acc_lim_theta kinematik modeline gore komut veriyor - eger
-// firmware kucuk bir omega komutunu sessizce PIVOT_BREAKAWAY_SPEED'e (~%43)
-// yukseltip SURDURURSE, robot nav2'nin varsaydigindan kat kat hizli doner ve
-// DWB'nin simule ettigi yorunge ile gercek pozisyon surekli sapar - bu da
-// "No valid trajectories"/"Failed to make progress" hatalarina ve sert/
-// yalpalayan donuslere yol aciyordu. Normal tekerler mecanuma gore cok daha
-// iyi tutundugu icin artik statik surtunmeyi yenmek sadece kisa bir "kick"
-// gerektiriyor - kick bitince gercekten istenen (dusuk) hiza dusuluyor, boylece
-// nav2'nin komut ettigi hiz ile motorun fiilen dondugu hiz birbirine yakin
-// kalir. Eger bu, dusuk hizli donuslerde yine patinaja/durmaya yol acarsa
-// (2026-08-31'deki gibi), KICK_MS artirilabilir veya MIN_EFFECTIVE_SPEED
-// yukseltilebilir - ama once bu haliyle canli test edilmeli.
-const unsigned long PIVOT_BREAKAWAY_KICK_MS = 180;
-unsigned long pivotStartMs = 0;
-bool pivotActive = false;
-int pivotOmegaSign = 0;
-
-// Pi'nin config.py'daki PURE_PIVOT_FORWARD_CREEP_PERCENT'iyle ayni deger -
-// ESP32'nin kendi web arayuzundeki joystick Pi'den gecmedigi icin bu enjeksiyonu
-// hic gormuyordu; boylece Pi'ye ihtiyac duymadan ayni "saf pivot" davranisi
-// ESP32 web arayuzunde de test edilebilir. Sadece handleDrive() (web joystick)
-// icinde uygulanir - Pi'nin DRIVE komutu (handlePiCommand) buna dokunmaz, cunku
-// nav2'nin kendi Spin recovery'si tam yerinde donus bekliyor.
-const float PURE_PIVOT_FORWARD_CREEP_PERCENT = 30.0;
-
-void motorWrite(const Motor &m, int speed, int minEffective = MIN_EFFECTIVE_SPEED) {
+void motorWrite(const Motor &m, int speed) {
   speed = constrain(speed, -255, 255);
-  if (speed != 0 && abs(speed) < minEffective) {
-    speed = (speed > 0) ? minEffective : -minEffective; // zayif komutlari calisir esige yukselt
-  }
   if (m.reversed) speed = -speed;
   digitalWrite(m.in1, speed > 0);
   digitalWrite(m.in2, speed < 0);
@@ -292,11 +243,11 @@ void motorWrite(const Motor &m, int speed, int minEffective = MIN_EFFECTIVE_SPEE
 }
 
 // vx: ileri(+)/geri(-), omega: saat yonu(+)/tersi(-); hepsi -255..255
-// Klasik 2 tekerlekli diferansiyel (skid-steer) surus: sol=vx-omega, sag=vx+omega.
+// Klasik 2 tekerlekli diferansiyel surus: sol=vx-omega, sag=vx+omega.
 void driveTank(int vx, int omega) {
   // Sadece "duz git" niyetinde (omega=0, komutlu donus yok) gyro duzeltmesi
-  // uygula - donus komutu varken (pivot/nav2 spin) karismasin diye omega!=0
-  // durumuna hic dokunulmuyor, pivot tespiti de hep ORIJINAL omega'yi kullanir.
+  // uygula; donus komutu varken (nav2 spin dahil) karismasin diye omega!=0
+  // durumuna hic dokunulmuyor.
   int correctedOmega = omega;
   if (omega == 0 && vx != 0 && gyroBiasReady && mpuReady) {
     float ax, ay, az, gx, gy, gz;
@@ -319,31 +270,8 @@ void driveTank(int vx, int omega) {
     rawR = rawR * 255 / maxMag;
   }
 
-  bool pivotLike = isPivotLike(vx, omega);
-  int omegaSign = (omega > 0) - (omega < 0);
-  if (pivotLike) {
-    if (!pivotActive || omegaSign != pivotOmegaSign) {
-      pivotStartMs = millis();
-      pivotActive = true;
-      pivotOmegaSign = omegaSign;
-    }
-  } else {
-    pivotActive = false;
-    pivotOmegaSign = 0;
-  }
-
-  // Statik surtunmeyi yenmek icin sadece kisa bir baslangic "kick"i - suresi
-  // dolunca gercekten istenen hiza (MIN_EFFECTIVE_SPEED tabaniyla) dusulur,
-  // nav2'nin komut ettigi hizla motorun fiilen dondugu hiz uyumlu kalsin diye
-  // (bkz. yukaridaki isPivotLike ustundeki 2026-09-05 (later still) notu).
-  int minEffective = MIN_EFFECTIVE_SPEED;
-  if (pivotLike) {
-    unsigned long elapsed = millis() - pivotStartMs;
-    minEffective = (elapsed < PIVOT_BREAKAWAY_KICK_MS) ? PIVOT_BREAKAWAY_SPEED : MIN_EFFECTIVE_SPEED;
-  }
-
-  motorWrite(motorRL, rawL, minEffective);
-  motorWrite(motorRR, rawR, minEffective);
+  motorWrite(motorRL, rawL);
+  motorWrite(motorRR, rawR);
 }
 
 void stopAll() {
@@ -375,8 +303,14 @@ button{font-size:15px;padding:10px 12px;margin:3px;border:none;border-radius:6px
 .joy-wrap{margin:20px auto}
 .joy-base{position:relative;width:180px;height:180px;background:#333;border-radius:50%;margin:10px auto;touch-action:none}
 .joy-stick{position:absolute;width:70px;height:70px;background:#1976d2;border-radius:50%;top:55px;left:55px}
+.topbar{display:flex;flex-direction:column;align-items:center;gap:4px;max-width:420px;margin:0 auto}
+.battery-info{text-align:center;font-size:13px;color:#999}
+.battery-info.battery-low{color:#ff5c5c;font-weight:bold}
 </style></head><body>
+<div class="topbar">
 <h1>RoboMotor Kontrol Paneli</h1>
+<div class="battery-info" id="batteryInfo">Pil: -</div>
+</div>
 <div class="joy-wrap"><h2>Joystick</h2>
 <div id="joyBase" class="joy-base"><div id="joyStick" class="joy-stick"></div></div>
 <div id="joyDbg" style="font-size:13px;color:#999"></div>
@@ -421,6 +355,24 @@ function bindHold(id,motor,dir){
   bindHold(m+'_fwd',m,'fwd');
   bindHold(m+'_bwd',m,'bwd');
 });
+
+const batteryInfo=document.getElementById('batteryInfo');
+function loadBattery(){
+  fetch('/power').then(r=>r.json()).then(data=>{
+    if(!data || data.status!=='OK'){
+      batteryInfo.textContent='Pil: -';
+      batteryInfo.classList.remove('battery-low');
+      return;
+    }
+    batteryInfo.textContent=`Pil: ${data.bus_voltage.toFixed(2)}V / ${data.battery_percent}% / ${data.current_ma.toFixed(0)}mA`;
+    batteryInfo.classList.toggle('battery-low',Boolean(data.low_voltage));
+  }).catch(()=>{
+    batteryInfo.textContent='Pil: -';
+    batteryInfo.classList.remove('battery-low');
+  });
+}
+loadBattery();
+setInterval(loadBattery,2000);
 
 (function(){
   const base=document.getElementById('joyBase');
@@ -527,6 +479,34 @@ void handleStatus() {
   server.send(200, "text/plain", buf);
 }
 
+// Pi'nin web arayuzundeki "Pil: X.XXV / Y.Y% / ZZZmA" gostergesiyle ayni
+// degerleri, ayni formulle uretir (bkz. services/power.py _voltage_to_percent).
+void handlePower() {
+  unsigned long ageMs = lastPowerReadMs == 0 ? 0xFFFFFFFF : millis() - lastPowerReadMs;
+
+  if (!inaReady || lastPowerReadMs == 0 || ageMs > 2000) {
+    server.send(200, "application/json", "{\"status\":\"ERROR\"}");
+    return;
+  }
+
+  float ratio = (BATTERY_MAX_VOLTAGE <= BATTERY_MIN_VOLTAGE)
+      ? 0.0f
+      : (lastBusV - BATTERY_MIN_VOLTAGE) / (BATTERY_MAX_VOLTAGE - BATTERY_MIN_VOLTAGE);
+  float percent = ratio * 100.0f;
+  if (percent < 0.0f) percent = 0.0f;
+  if (percent > 100.0f) percent = 100.0f;
+
+  float currentMa = lastShuntMv / BATTERY_SHUNT_OHMS;
+  bool lowVoltage = lastBusV <= BATTERY_LOW_VOLTAGE_WARNING;
+
+  char buf[200];
+  snprintf(buf, sizeof(buf),
+           "{\"status\":\"OK\",\"bus_voltage\":%.3f,\"battery_percent\":%.1f,"
+           "\"current_ma\":%.1f,\"low_voltage\":%s}",
+           lastBusV, percent, currentMa, lowVoltage ? "true" : "false");
+  server.send(200, "application/json", buf);
+}
+
 // JS'in ~300ms'de bir fetch ile okudugu yon farkindali enkoder pozisyonlari
 void handleEncValues() {
   char buf[64];
@@ -593,12 +573,6 @@ void handleDrive() {
   }
   int vx = constrain(server.arg("vx").toInt(), -255, 255);
   int omega = constrain(server.arg("omega").toInt(), -255, 255);
-  if (vx == 0 && omega != 0) {
-    // saf pivot: Pi'nin nav2/explore/ros2 disi kaynaklarda yaptigi ayni ileri
-    // kaymayi burada da enjekte et, boylece Pi'ye gec kalmadan ESP32 web
-    // arayuzunden de test edilebilir.
-    vx = round(PURE_PIVOT_FORWARD_CREEP_PERCENT / 100.0 * 255);
-  }
   driveTank(vx, omega);
   lastCmdWasWeb = true; // Pi zaman asimi bu komutu durdurmasin
   lastWebCmdMs = millis(); // web bekcisi: bu komuttan itibaren say
@@ -927,6 +901,7 @@ void setup() {
   server.on("/stopall", handleStopAll);
   server.on("/drive", handleDrive);
   server.on("/status", handleStatus);
+  server.on("/power", handlePower);
   server.on("/encoders", handleEncoders);
   server.on("/encvalues", handleEncValues);
   server.on("/encreset", handleEncReset);

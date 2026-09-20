@@ -3,7 +3,7 @@
 # ayarlaniyordu - canli testte manuel x=40 (~%40) 0.6s'de ~150 derece donmesi
 # asiri agresif bulundu. Tek bir paylasilan tavan ile ikisi de ayni
 # yumusaklikta tutuluyor (bkz. MOTOR.MAX_TURN_PERCENT ve
-# MAP.ROS2_NAV2_MAX_TURN_PERCENT/ROS2_NAV2_TURN_HOLD_PERCENT).
+# MAP.ROS2_NAV2_MAX_TURN_PERCENT).
 # Ilk denemede 30.0 verildi, ama canli testte (farkli sure ile karsilastirilmis
 # olsa da) beklenenden cok daha yavas donduk - dusuk yuzdede patinaj/tutunamama
 # riski de var. 36.0'a yukseltildi, ayni sure (0.6s) ile adil karsilastirma
@@ -50,15 +50,9 @@ ULTRASONIC = {
 }
 
 MOTOR = {
-    "MIN_EFFECTIVE_LINEAR_PERCENT": 12.0,
-    "MIN_EFFECTIVE_TURN_PERCENT": 8.0,
     # Manuel/joystick donusler icin ust sinir - nav2 ile ortak, bkz. yukaridaki
     # SHARED_MAX_TURN_PERCENT notu.
-    "MAX_TURN_PERCENT": SHARED_MAX_TURN_PERCENT,
-    # Sag arka tekerin daha zayif kaldigi yonu kucuk ve surekli bir taban tork
-    # farkiyla telafi et. Darbeli kick SLAM yaw sicramalarina neden oldugu icin
-    # tamamen kaldirildi.
-    "RIGHT_TURN_EXTRA_MIN_TURN_PERCENT": 4.0
+    "MAX_TURN_PERCENT": SHARED_MAX_TURN_PERCENT
 }
 
 LIDAR = {
@@ -298,9 +292,19 @@ MAP = {
     "ROS2_NAV2_MAX_LINEAR_X": 0.144,
     "ROS2_NAV2_MAX_ANGULAR_Z": 0.34,
     "ROS2_NAV2_MAX_DRIVE_PERCENT": 22.8,
-    "ROS2_NAV2_MAX_TURN_PERCENT": SHARED_MAX_TURN_PERCENT,
-    "ROS2_NAV2_TURN_HOLD_PERCENT": SHARED_MAX_TURN_PERCENT,
-    "ROS2_NAV2_TURN_BREAKAWAY_SECONDS": 0.20,
+    # 2026-09-19: was SHARED_MAX_TURN_PERCENT (36.0, shared with manual
+    # joystick driving) - live gyro tests this session showed 36% turn
+    # commands produce 90-100 deg/s real rotation, smearing ~15-20 deg of
+    # real heading into a single ~150-200ms lidar sweep (slam_toolbox does
+    # NOT deskew scans - confirmed no time_increment/motion-compensation
+    # logic in this slam_toolbox build's laser_utils.hpp), which is what
+    # triggers most MAP JUMP events during actual autonomous driving/turning
+    # (live-reproduced: 2 gross jumps in ~20s, both while nav2 was driving at
+    # x=36.0). Split nav2's own cap out from the shared joystick constant so
+    # manual driving keeps its full responsiveness. Chose 10.0 from a live
+    # sweep at 4/6/8/10%: real speed stayed in a ~20-70 deg/s band (vs 90-100
+    # at 36%), roughly halving worst-case per-scan smear.
+    "ROS2_NAV2_MAX_TURN_PERCENT": 10.0,
     "ROS2_NAV2_ANGULAR_SLEW_RATE": 0.45,
     "ROS2_NAV2_MIN_LINEAR_SCALE_AT_MAX_TURN": 0.25,
     "ROS2_CMDVEL_ODOM_RATE_HZ": 50.0,
@@ -320,9 +324,19 @@ MAP = {
     # TELEM fields) are the odom translation source, fused by robot_localization's
     # EKF (config/ekf.yaml). Calibrated 2026-09-14 via SLAM-pose-vs-tick-delta
     # measurement (see /memories/repo/robotpi_slam_notes.md for method).
+    # 2026-09-19: track width re-measured via a direct gyro-vs-encoder in-place
+    # turn test (integrated real gyro yaw over ~1.8-2s vs encoder-tick-derived
+    # yaw over the same window, at two different turn speeds) - the old 0.243
+    # value made encoder-derived yaw rate read ~2.4x TOO LOW vs the real gyro,
+    # consistently across both speeds tested (so a geometry/calibration
+    # constant, not speed-dependent wheel slip). Note: this does NOT affect
+    # current SLAM behavior - config/ekf.yaml only fuses this raw odom's
+    # linear.x, yaw rate is fused straight from /imu/data (real gyro) - but it
+    # was still wrong for the raw /odom_raw debug output and any future
+    # encoder-only fallback path, so corrected here.
     "ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED": True,
     "ROS2_ENCODER_TICKS_PER_METER": 21786.0,
-    "ROS2_ENCODER_TRACK_WIDTH_M": 0.243,
+    "ROS2_ENCODER_TRACK_WIDTH_M": 0.102,
     "ROS2_ENCODER_MAX_AGE_SECONDS": 0.5,
     # Watchdog for slam_toolbox scan-matching failures: a real robot can't
     # move faster than ROS2_NAV2_MAX_LINEAR_X, so a much larger implied
@@ -362,14 +376,9 @@ MAP = {
     # kendisi bu esigin uzerindeyken hatayi biriktirme, sadece donus
     # yavaslayip/durduktan sonraki gercek uyusmazligi say.
     "MAP_IMU_YAW_FAST_TURN_DPS": 25.0,
-    # Reset sonrasi exploration'i otomatik devam ettir (motor zaten durdu,
-    # robot hareketsizken hata sifirlaniyor - insan mudahalesi olmadan devam
-    # edebilmesi lazim). Kisa surede tekrar tekrar tetiklenirse (gercek/
-    # kalici bir sorun ihtimali) otomatik devami durdurup manuel incelemeye birak.
-    "MAP_JUMP_AUTO_RESUME_ENABLED": True,
-    "MAP_JUMP_AUTO_RESUME_SETTLE_SECONDS": 2.0,
-    "MAP_JUMP_AUTO_RESUME_MAX_RETRIES": 3,
-    "MAP_JUMP_AUTO_RESUME_WINDOW_SECONDS": 300.0,
+    # A detected jump stops the robot. Full SLAM reset/restart is opt-in: it
+    # is a diagnostic recovery tool, not normal navigation behaviour.
+    "MAP_JUMP_AUTO_RECOVERY_ENABLED": False,
     # 2026-09-05: guc/I2C glitch (bkz. repo notlari) sirasinda lidar'in
     # USB-seri baglantisi donup /scan yayinini tamamen durdurabiliyor, ve
     # kendi kendine toparlanmiyor (glitch bitmesine ragmen dakikalarca

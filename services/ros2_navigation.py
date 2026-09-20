@@ -15,6 +15,15 @@ class Ros2NavigationService:
         self.enabled = bool(MAP.get("ROS2_NAV2_ENABLED", True))
         self._nav2_process = None
         self._explore_process = None
+        # True whenever the caller last asked for autonomous exploration to be
+        # running (set in start_exploration(), cleared in stop_exploration()),
+        # independent of explore_lite's current live/dead process state.
+        # Watchdogs (e.g. app.py's MAP JUMP WATCHDOG) key off this intent
+        # instead of momentary process/goal status, so a transient explore_lite
+        # crash (unrelated nav2 action-server race, etc.) that happens to occur
+        # right before a reset doesn't get mistaken for "wasn't exploring" and
+        # leave the robot stuck idle instead of resuming as intended.
+        self._exploration_intent = False
         self._cmdvel_bridge_process = None
         self._imu_bridge_process = None
         self._ekf_process = None
@@ -245,10 +254,6 @@ class Ros2NavigationService:
         max_angular_z = float(MAP.get("ROS2_NAV2_MAX_ANGULAR_Z", 1.0))
         max_drive_percent = float(MAP.get("ROS2_NAV2_MAX_DRIVE_PERCENT", 38.0))
         max_turn_percent = float(MAP.get("ROS2_NAV2_MAX_TURN_PERCENT", 46.0))
-        turn_hold_percent = float(MAP.get("ROS2_NAV2_TURN_HOLD_PERCENT", 52.0))
-        turn_breakaway_seconds = float(
-            MAP.get("ROS2_NAV2_TURN_BREAKAWAY_SECONDS", 0.30)
-        )
         angular_slew_rate = float(MAP.get("ROS2_NAV2_ANGULAR_SLEW_RATE", 0.45))
         min_linear_scale_at_max_turn = float(
             MAP.get("ROS2_NAV2_MIN_LINEAR_SCALE_AT_MAX_TURN", 0.25)
@@ -285,8 +290,6 @@ class Ros2NavigationService:
             f"--max-angular-z {shlex.quote(str(max_angular_z))} "
             f"--max-drive-percent {shlex.quote(str(max_drive_percent))} "
             f"--max-turn-percent {shlex.quote(str(max_turn_percent))} "
-            f"--turn-hold-percent {shlex.quote(str(turn_hold_percent))} "
-            f"--turn-breakaway-seconds {shlex.quote(str(turn_breakaway_seconds))} "
             f"--angular-slew-rate {shlex.quote(str(angular_slew_rate))} "
             f"--min-linear-scale-at-max-turn {shlex.quote(str(min_linear_scale_at_max_turn))} "
             f"--odom-rate-hz {shlex.quote(str(odom_rate_hz))} "
@@ -469,7 +472,21 @@ class Ros2NavigationService:
 
     def _wait_for_global_costmap_ready(self, timeout_sec=15):
 
-        costmap_topic = str(MAP.get("ROS2_EXPLORE_COSTMAP_TOPIC", "/global_costmap/costmap"))
+        # 2026-09-19: was defaulting to "/global_costmap/costmap" (nav2's own
+        # costmap), which is the WRONG topic - explore_lite's Explore
+        # constructor calls makePlan() synchronously, before rclpy starts
+        # spinning, against its own Costmap2DClient, which is subscribed to
+        # whatever "costmap_topic" explore_lite_params.yaml sets - here
+        # that's "/map" (slam_toolbox's raw output), not nav2's global
+        # costmap. nav2's global costmap can still hold stale data (or get
+        # refreshed from its own static/sensor layers) even while
+        # slam_toolbox's /map has published nothing yet post-reset, so the
+        # old check could return "ready" before explore_lite's own costmap
+        # client had anything to size itself against - explaining why
+        # explore_lite's first frontier search would find a still-empty,
+        # zero-sized costmap and fail with "Robot out of costmap bounds" on
+        # its very first (constructor-time) makePlan() call, every time.
+        costmap_topic = str(MAP.get("ROS2_EXPLORE_COSTMAP_TOPIC", "/map"))
         command = (
             f"timeout {int(max(1, timeout_sec))} "
             f"ros2 topic echo {shlex.quote(costmap_topic)} --once >/dev/null"
@@ -599,6 +616,8 @@ class Ros2NavigationService:
                 "message": "Navigation service disabled"
             }
 
+        self._exploration_intent = True
+
         nav2_result = self.start_nav2()
         if nav2_result.get("status") != "OK":
             return nav2_result
@@ -667,8 +686,50 @@ class Ros2NavigationService:
             f">> {shlex.quote(str(self._explore_log))} 2>&1"
         )
 
-        self._explore_process = self._spawn_command(shell_cmd)
-        time.sleep(0.6)
+        # m-explore-ros2's very first frontier search runs synchronously inside
+        # its constructor, using its own freshly-created TF buffer. If that
+        # buffer hasn't yet buffered a transform for the *current* instant
+        # (getRobotPose() requests "now", not "latest"), it silently falls
+        # back to a (0,0,0) pose, which looks "out of costmap bounds" once the
+        # map has grown away from world-origin - and explore_lite gives up
+        # permanently on that (no built-in retry). One-off startup timing
+        # glitch, not "nothing left to explore" - retry the launch a few
+        # times if this exact race is observed right after startup.
+        # 2026-09-19: raised from 3/6.0s - when this is called right after
+        # mapping.reset() (MAP JUMP WATCHDOG auto-resume path), slam_toolbox/
+        # the lidar driver are ALSO freshly respawned (see
+        # Ros2SlamService.reset()/_restart_stack_after_reset()), not just
+        # explore_lite, so TF can legitimately take longer to become reliable
+        # than in the plain "nav2 already warm" case this was first tuned
+        # against - observed 3/3 attempts at the old settings still hitting
+        # the race once in that colder-start scenario.
+        max_attempts = 5
+        for attempt in range(1, max_attempts + 1):
+            self._explore_process = self._spawn_command(shell_cmd)
+            spawn_time = time.time()
+            # growing settle before the first activity check on later
+            # attempts, in case TF just needs a bit more warm-up time.
+            time.sleep(0.6 + 0.4 * (attempt - 1))
+
+            hit_startup_race = False
+            while time.time() - spawn_time < 10.0:
+                explore_active, explore_reason = self._exploration_activity()
+                if explore_active:
+                    break
+                if explore_reason == "no_frontiers":
+                    hit_startup_race = True
+                    break
+                time.sleep(0.3)
+
+            if not hit_startup_race or attempt == max_attempts:
+                break
+
+            self._terminate_process_group(self._explore_process)
+            self._explore_process = None
+
+            # Retrying a launch is safe. Do not inject a motor command to
+            # repair a startup race; report a persistent no-frontier state.
+            time.sleep(1.0)
 
         return {
             "status": "OK",
@@ -679,6 +740,7 @@ class Ros2NavigationService:
 
     def stop_exploration(self):
 
+        self._exploration_intent = False
         self._terminate_process_group(self._explore_process)
         self._explore_process = None
 
@@ -716,7 +778,8 @@ class Ros2NavigationService:
             "explore_running": explore_status == "running" and explore_active,
             "explore_process_running": explore_status == "running",
             "explore_active": explore_active,
-            "explore_reason": explore_reason
+            "explore_reason": explore_reason,
+            "exploration_intent": self._exploration_intent
         }
 
     def close(self):

@@ -1,0 +1,31 @@
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -383,7 +383,10 @@ void Explore::reachedGoal(const NavigationGoalHandle::WrappedResult& result,
+   goal_active_ = false;
+   switch (result.code) {
+     case rclcpp_action::ResultCode::SUCCEEDED:
+       RCLCPP_DEBUG(logger_, "Goal was successful");
++      // A completed frontier can remain in an unchanged occupancy grid for a
++      // few scans. Mark it complete so it is not selected again immediately.
++      frontier_blacklist_.push_back(frontier_goal);
+       last_progress_ = this->now();
+       prev_distance_ = 0;
+       break;
+@@ -413,15 +416,6 @@ void Explore::reachedGoal(const NavigationGoalHandle::WrappedResult& result,
+       RCLCPP_WARN(logger_, "Unknown result code from move base nav2");
+       break;
+   }
+-  // find new goal immediately regardless of planning frequency.
+-  // execute via timer to prevent dead lock in move_base_client (this is
+-  // callback for sendGoal, which is called in makePlan). the timer must live
+-  // until callback is executed.
+-  // oneshot_ = relative_nh_.createTimer(
+-  //     ros::Duration(0, 0), [this](const ros::TimerEvent&) { makePlan(); },
+-  //     true);
+-
+-  // Because of the 1-thread-executor nature of ros2 I think timer is not
+-  // needed.
+-  makePlan();
++  // Let the planner timer select the next frontier after fresh map data
++  // arrives. Calling makePlan() here bypasses planner_frequency.
+ }

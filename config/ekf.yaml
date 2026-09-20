@@ -4,9 +4,8 @@
 # Kalman filter, using nav2's own recommended localization package.
 #
 # Inputs:
-#  - /odom_raw (nav_msgs/Odometry, from ros2_cmdvel_bridge.py): the only
-#    translation-velocity source available (no wheel encoders - derived from
-#    commanded/motor-actual drive percentage). Only vx is fused; this node
+#  - /odom_raw (nav_msgs/Odometry, from ros2_cmdvel_bridge.py): wheel-encoder
+#    derived translation velocity. Only vx is fused; this node
 #    does its own pose integration, so odom_raw's own pose fields are not
 #    trusted/fused (would be a redundant/circular double-integration).
 #  - /imu/data (sensor_msgs/Imu, from ros2_imu_bridge.py): MPU6050 gyro_z

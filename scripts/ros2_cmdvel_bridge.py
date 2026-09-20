@@ -35,8 +35,6 @@ class CmdVelBridge(Node):
         self.max_angular = max(0.01, float(args.max_angular_z))
         self.max_drive = max(10.0, float(args.max_drive_percent))
         self.max_turn = max(10.0, float(args.max_turn_percent))
-        self.turn_hold = max(10.0, min(self.max_turn, float(args.turn_hold_percent)))
-        self.turn_breakaway_seconds = max(0.0, float(args.turn_breakaway_seconds))
         self.angular_slew_rate = max(0.05, float(args.angular_slew_rate))
         self.min_linear_scale_at_max_turn = max(
             0.0,
@@ -54,8 +52,6 @@ class CmdVelBridge(Node):
         self.target_angular = 0.0
         self.last_cmd_time = self.get_clock().now()
         self._last_drive_monotonic = time.monotonic()
-        self._turn_breakaway_started = None
-        self._turn_breakaway_direction = 0
         self._last_sent_was_idle = True
 
         self.odom_vx_variance = max(1e-6, float(args.odom_vx_variance))
@@ -266,23 +262,6 @@ class CmdVelBridge(Node):
             min(self.max_turn, (self.current_angular / self.max_angular) * self.max_turn)
         )
 
-        turn_direction = 1 if x_percent > 0 else -1 if x_percent < 0 else 0
-        if abs(x_percent) > self.turn_hold:
-            if turn_direction != self._turn_breakaway_direction:
-                self._turn_breakaway_direction = turn_direction
-                self._turn_breakaway_started = now_monotonic
-            elif self._turn_breakaway_started is None:
-                self._turn_breakaway_started = now_monotonic
-
-            if (
-                now_monotonic - self._turn_breakaway_started
-                >= self.turn_breakaway_seconds
-            ):
-                x_percent = turn_direction * self.turn_hold
-        else:
-            self._turn_breakaway_started = None
-            self._turn_breakaway_direction = turn_direction
-
         y_percent = max(
             -self.max_drive,
             min(self.max_drive, (self.current_linear / self.max_linear) * self.max_drive)
@@ -359,9 +338,7 @@ class CmdVelBridge(Node):
 
         odom.twist.twist.linear.x = float(v)
         odom.twist.twist.angular.z = float(w)
-        # Row-major 6x6 covariance; only the fused field (linear.x, index 0)
-        # needs a realistic value - there are no wheel encoders, so this is
-        # an open-loop estimate and shouldn't be over-trusted by the EKF.
+        # Row-major 6x6 covariance; only linear.x is fused from this source.
         odom.twist.covariance[0] = self.odom_vx_variance
         odom.twist.covariance[35] = self.odom_vyaw_variance
 
@@ -394,8 +371,6 @@ def parse_args():
     parser.add_argument("--max-angular-z", type=float, default=1.0)
     parser.add_argument("--max-drive-percent", type=float, default=38.0)
     parser.add_argument("--max-turn-percent", type=float, default=46.0)
-    parser.add_argument("--turn-hold-percent", type=float, default=52.0)
-    parser.add_argument("--turn-breakaway-seconds", type=float, default=0.30)
     parser.add_argument("--angular-slew-rate", type=float, default=0.45)
     parser.add_argument("--min-linear-scale-at-max-turn", type=float, default=0.25)
     parser.add_argument("--command-timeout-sec", type=float, default=0.45)

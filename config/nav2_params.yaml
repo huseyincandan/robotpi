@@ -71,25 +71,25 @@ controller_server:
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: false
-      # Was 0.0 to allow pure in-place pivots, but on this 4WD skid-steer
-      # chassis a vx=0 turn needs way more torque to beat scrub friction on
-      # all 4 wheels than the firmware's MIN_EFFECTIVE_SPEED provides - the
-      # commanded omega just spun the wheels without turning the robot
-      # (confirmed live: gyro stayed ~0 while a nonzero turn was continuously
-      # sent). Forcing a small forward creep makes every turn a rolling arc
-      # instead of a dead pivot, which the chassis can actually execute.
-      min_vel_x: 0.04
+      # Frontier centroids do not have a useful final heading. Keep a small
+      # forward component while steering so route progress wins over pivots.
+      min_vel_x: 0.03
       max_vel_x: 0.24
-      # Lowered from 1.0/1.2 - calmer normal-wander turning; door-threshold
-      # push-through recovery lives in services/motor.py, unaffected by this.
-      max_vel_theta: 0.45
+      # Lowered from 1.0/1.2 for calmer normal-wander turning.
+      # 2026-09-19: was 0.45 - cmdvel_bridge clamps the real output turn
+      # percent to ROS2_NAV2_MAX_TURN_PERCENT (config.py) regardless of what
+      # nav2 requests here, so this alone wasn't the physical cap - but
+      # leaving it at 0.45 had DWB planning/scoring trajectories around a
+      # speed ~4x faster than what actually happens on the robot. Lowered to
+      # match the new physical cap so trajectory simulation reflects reality.
+      max_vel_theta: 0.12
       min_speed_xy: 0.0
       max_speed_xy: 0.24
       min_speed_theta: 0.0
       acc_lim_x: 0.35
-      acc_lim_theta: 0.45
+      acc_lim_theta: 0.2
       decel_lim_x: -0.35
-      decel_lim_theta: -0.45
+      decel_lim_theta: -0.2
       vx_samples: 12
       vtheta_samples: 16
       # Bumped from 1.2s: longer look-ahead lets the planner start curving
@@ -104,36 +104,11 @@ controller_server:
       short_circuit_trajectory_evaluation: true
       stateful: true
       critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      # Default RotateToGoal.scale (32) strongly biases DWB toward pure
-      # in-place pivots once near the goal; lowered so it's a soft nudge
-      # rather than an override, letting GoalAlign/PathAlign steer smoother
-      # blended-arc approaches instead. PathAlign/GoalAlign raised to favor
-      # trajectories that curve into the local plan's heading rather than
-      # snapping to a sharp point turn.
-      # 2026-09-13: explore_lite's frontier selection has no heading-awareness at
-      # all (orientation_scale is unused, see explore_lite_params.yaml), so back
-      # to back goals routinely land in wildly different directions - reported as
-      # the robot "looking around" instead of moving in a straight line. Lowered
-      # further from 8.0 so a large heading error is a soft nudge, not enough to
-      # win against PathAlign/GoalAlign, letting the planner curve into a turn
-      # instead of stopping to pivot first.
+      # Favour route progress over heading correction. The lower scales avoid
+      # wasting a route in turn-in-place behaviour for heading-less goals.
       RotateToGoal.scale: 3.0
       RotateToGoal.slowing_factor: 5.0
       RotateToGoal.lookahead_time: -1.0
-      # 2026-09-14: even after softening RotateToGoal and adding SmoothPath,
-      # live /drive logs during a corridor run showed sustained near-max-clamp
-      # turn commands (x around -30 to -36%) with only weak forward creep
-      # (y around 5-20%) for many consecutive cycles - the robot was mostly
-      # rotating in place (yaw wrapping repeatedly through +-pi) rather than
-      # translating, even though the path was smoothed and RotateToGoal was
-      # already low. Root cause: PathAlign/GoalAlign were raised to 32/24 in
-      # an earlier session specifically to win against RotateToGoal, but they
-      # penalize heading misalignment just as steeply as a pivot-favoring
-      # critic once explore_lite's headless goals create a large path/goal
-      # heading error - so they were reproducing the same "turn before you
-      # translate" behavior under a different critic. Halved both so
-      # PathDist/GoalDist (progress-toward-goal, left at DWB defaults ~32/24)
-      # can compete evenly instead of alignment dominating every cycle.
       PathAlign.scale: 12.0
       GoalAlign.scale: 10.0
       BaseObstacle.scale: 0.10
@@ -192,9 +167,11 @@ behavior_server:
     # making every Spin recovery feel much harsher/faster than normal driving.
     # Lowered to match normal turn speed; recovery still turns, just no
     # harder than an ordinary autonomous turn.
-    max_rotational_vel: 0.45
-    min_rotational_vel: 0.15
-    rotational_acc_lim: 1.2
+    # 2026-09-19: matches FollowPath's max_vel_theta drop to 0.12 - see that
+    # comment (MAP JUMP / turn-speed live test findings).
+    max_rotational_vel: 0.12
+    min_rotational_vel: 0.10
+    rotational_acc_lim: 0.6
 
 local_costmap:
   local_costmap:

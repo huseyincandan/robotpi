@@ -264,33 +264,6 @@ class MotorService:
 
         return sent
 
-    def _clamp_min_effective(self, value, minimum):
-
-        if abs(value) <= 0:
-            return 0.0
-
-        if abs(value) >= minimum:
-            return float(value)
-
-        return float(minimum if value > 0 else -minimum)
-
-    def _apply_minimum_effective_command(self, x, y):
-
-        min_linear = float(MOTOR.get("MIN_EFFECTIVE_LINEAR_PERCENT", 12.0))
-        min_turn = float(MOTOR.get("MIN_EFFECTIVE_TURN_PERCENT", 8.0))
-
-        # Sag arka teker patinaj yaptigi icin sag donusler (x<0) ayni
-        # yuzdede sol donuse gore daha az torka ulasiyor - taban yuzdeyi yukselt.
-        if x < 0:
-            min_turn += float(MOTOR.get("RIGHT_TURN_EXTRA_MIN_TURN_PERCENT", 0.0))
-
-        y = self._clamp_min_effective(y, min_linear)
-
-        if abs(x) > 0:
-            x = self._clamp_min_effective(x, min_turn)
-
-        return x, y
-
     def _lidar_sector_min(self, points, center_deg, half_sector=15.0):
 
         minimum = None
@@ -425,8 +398,6 @@ class MotorService:
 
         self.last_requested_x = x
         self.last_requested_y = y
-
-        x, y = self._apply_minimum_effective_command(x, y)
 
         max_turn = float(MOTOR.get("MAX_TURN_PERCENT", 100.0))
         if abs(x) > max_turn:
