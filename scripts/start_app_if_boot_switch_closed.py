@@ -30,7 +30,7 @@ if PROJECT_DIR not in sys.path:
         PROJECT_DIR
     )
 
-from config import APP, BOOT_SWITCH
+from config import BOOT_SWITCH
 
 
 def main():
@@ -59,18 +59,10 @@ def main():
             flush=True
         )
 
+        launcher = PROJECT_DIR + "/scripts/run_app.py"
         os.execv(
             sys.executable,
-            [
-                sys.executable,
-                "-m",
-                "uvicorn",
-                "app:app",
-                "--host",
-                APP["HOST"],
-                "--port",
-                str(APP["PORT"])
-            ]
+            [sys.executable, launcher, "--launch-mode", "gpio26"]
         )
 
     finally:

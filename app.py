@@ -64,6 +64,13 @@ from utils.logger import (
 
 setup_run_logging()
 
+print(
+    "APP LAUNCH:",
+    f"mode={os.environ.get('ROBOTPI_LAUNCH_MODE', 'direct-unsupported')}",
+    f"python={sys.executable}",
+    flush=True
+)
+
 from services.motor import (
     MotorService
 )

@@ -163,6 +163,18 @@ def _write_run_metadata(run_dir):
 		metadata_file.write(
 			"python=" + sys.executable + "\n"
 		)
+		metadata_file.write(
+			"launch_mode=" + os.environ.get(
+				"ROBOTPI_LAUNCH_MODE",
+				"direct-unsupported"
+			) + "\n"
+		)
+		metadata_file.write(
+			"launch_entrypoint=" + os.environ.get(
+				"ROBOTPI_LAUNCH_ENTRYPOINT",
+				"direct"
+			) + "\n"
+		)
 
 
 def _create_unique_run_dir(logs_dir, run_prefix):

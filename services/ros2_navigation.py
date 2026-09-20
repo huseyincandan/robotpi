@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from config import MAP
+from utils.logger import get_current_log_dir
 
 
 class Ros2NavigationService:
@@ -49,11 +50,15 @@ class Ros2NavigationService:
         self._explore_params_file = explore_params_file
         self._cmdvel_bridge_script = Path(__file__).resolve().parents[1] / "scripts" / "ros2_cmdvel_bridge.py"
         self._imu_bridge_script = Path(__file__).resolve().parents[1] / "scripts" / "ros2_imu_bridge.py"
-        self._cmdvel_bridge_log = Path("/tmp/robotpi_cmdvel_bridge.log")
-        self._imu_bridge_log = Path("/tmp/robotpi_imu_bridge.log")
-        self._ekf_log = Path("/tmp/robotpi_ekf.log")
-        self._nav2_log = Path("/tmp/robotpi_nav2.log")
-        self._explore_log = Path("/tmp/robotpi_explore.log")
+        # Keep every child-process log beside its owning app run. /tmp logs
+        # from different starts were indistinguishable and made diagnosis
+        # depend on timestamps rather than a single run directory.
+        self._run_log_dir = Path(get_current_log_dir())
+        self._cmdvel_bridge_log = self._run_log_dir / "cmdvel_bridge.log"
+        self._imu_bridge_log = self._run_log_dir / "imu_bridge.log"
+        self._ekf_log = self._run_log_dir / "ekf.log"
+        self._nav2_log = self._run_log_dir / "nav2.log"
+        self._explore_log = self._run_log_dir / "explore.log"
 
         ekf_params_file = Path(str(MAP.get("ROS2_EKF_PARAMS_FILE", "config/ekf.yaml")))
         if not ekf_params_file.is_absolute():
