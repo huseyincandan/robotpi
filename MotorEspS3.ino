@@ -244,9 +244,11 @@ void motorWrite(const Motor &m, int speed) {
 
 // vx: ileri(+)/geri(-), omega: saat yonu(+)/tersi(-); hepsi -255..255
 // Klasik 2 tekerlekli diferansiyel surus: sol=vx-omega, sag=vx+omega.
-// Pi/Nav2 commands already close their yaw loop using the IMU/EKF.  Applying
-// this older firmware gyro trim to them creates an unrequested omega even for
-// a Pi "DRIVE vx 0" command, so retain it only for the direct web joystick.
+// The web joystick's IMU trim is also needed when Pi requests an exactly
+// straight command. A live test with the ball caster still measured about
+// -10.8 dps yaw at DRIVE vx,0; without this inner, fast correction Nav2 only
+// sees the drift after it has already curved. Never apply it to a requested
+// turn: Nav2 remains the sole owner whenever omega is non-zero.
 void driveTank(int vx, int omega, bool applyStraightGyroCorrection = true) {
   // Sadece "duz git" niyetinde (omega=0, komutlu donus yok) gyro duzeltmesi
   // uygula; donus komutu varken (nav2 spin dahil) karismasin diye omega!=0
@@ -762,12 +764,12 @@ void handlePiCommand(String line, Stream &out) {
     if (sp2 == -1) { out.println("ERR eksik parametre"); return; }
     int vx = constrain(rest.substring(0, sp2).toInt(), -255, 255);
     int omega = constrain(rest.substring(sp2 + 1).toInt(), -255, 255);
-    driveTank(vx, omega, false);
+    driveTank(vx, omega, omega == 0);
     out.println("OK");
   } else if (cmd == "FWD" || cmd == "BWD" || cmd == "LEFT" || cmd == "RIGHT") {
     int speed = rest.length() ? constrain(rest.toInt(), 0, 255) : WEB_SPEED;
-    if (cmd == "FWD") driveTank(speed, 0, false);
-    else if (cmd == "BWD") driveTank(-speed, 0, false);
+    if (cmd == "FWD") driveTank(speed, 0, true);
+    else if (cmd == "BWD") driveTank(-speed, 0, true);
     else if (cmd == "LEFT") driveTank(0, -speed, false);
     else driveTank(0, speed, false); // RIGHT
     out.println("OK");
