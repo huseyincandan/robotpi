@@ -1,0 +1,67 @@
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -271,28 +271,52 @@
+   // Sending that point directly gives Nav2 a goal in an inflated edge cell.
+   // It also permits tiny, sub-breakaway goals (observed at 0.15 m), which
+   // make this differential-drive robot rotate in place instead of exploring.
+-  // Use a suitable frontier's centroid direction, then stop short on the
+-  // already-known free side of that boundary.
++  // At startup a single frontier can surround the robot, making both its
++  // centroid and nearest cell misleadingly close. Select a sufficiently far,
++  // forward-facing boundary point, then stop short on its known-free side.
+   auto frontier = std::find_if_not(
+       frontiers.begin(), frontiers.end(),
+-      [this, &pose](const frontier_exploration::Frontier& f) {
+-        const double dx = f.centroid.x - pose.position.x;
+-        const double dy = f.centroid.y - pose.position.y;
+-        const double centroid_distance = std::hypot(dx, dy);
+-        return goalOnBlacklist(f.centroid) ||
+-               centroid_distance < min_goal_distance_ + frontier_goal_standoff_;
++      [this](const frontier_exploration::Frontier& f) {
++        return goalOnBlacklist(f.centroid);
+       });
+   if (frontier == frontiers.end()) {
+-    RCLCPP_DEBUG(logger_,
+-                 "No safe frontier yet (need %.2f m from boundary); waiting for map update.",
+-                 min_goal_distance_ + frontier_goal_standoff_);
++    RCLCPP_DEBUG(logger_, "No untried frontier yet; waiting for map update.");
+     return;
+   }
+ 
+-  geometry_msgs::msg::Point target_position = frontier->centroid;
++  const double minimum_boundary_distance =
++      min_goal_distance_ + frontier_goal_standoff_;
++  const double desired_boundary_distance = minimum_boundary_distance + 0.35;
++  const auto& q = pose.orientation;
++  const double heading = std::atan2(
++      2.0 * (q.w * q.z + q.x * q.y),
++      1.0 - 2.0 * (q.y * q.y + q.z * q.z));
++  const double forward_x = std::cos(heading);
++  const double forward_y = std::sin(heading);
++  geometry_msgs::msg::Point boundary_position;
++  double distance_to_boundary = 0.0;
++  double best_score = std::numeric_limits<double>::infinity();
++  for (const auto& point : frontier->points) {
++    const double point_dx = point.x - pose.position.x;
++    const double point_dy = point.y - pose.position.y;
++    const double distance = std::hypot(point_dx, point_dy);
++    if (distance < minimum_boundary_distance) continue;
++    const double forwardness = (point_dx * forward_x + point_dy * forward_y) / distance;
++    const double score = std::abs(distance - desired_boundary_distance) - 0.30 * forwardness;
++    if (score < best_score) {
++      best_score = score;
++      boundary_position = point;
++      distance_to_boundary = distance;
++    }
++  }
++  if (!std::isfinite(best_score)) {
++    RCLCPP_DEBUG(logger_, "No safe frontier point yet; waiting for map update.");
++    return;
++  }
++
++  geometry_msgs::msg::Point target_position = boundary_position;
+   const double dx = target_position.x - pose.position.x;
+   const double dy = target_position.y - pose.position.y;
+-  const double distance_to_boundary = std::hypot(dx, dy);
+   target_position.x -= frontier_goal_standoff_ * dx / distance_to_boundary;
+   target_position.y -= frontier_goal_standoff_ * dy / distance_to_boundary;

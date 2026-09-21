@@ -33,7 +33,10 @@
     # patched explorer sends the goal this far back on the known-free side of
     # the frontier, rather than into an inflated wall/corner boundary cell.
     min_goal_distance: 0.45
-    frontier_goal_standoff: 0.35
+    # 20cm standoff + 45cm minimum target distance requires a frontier at
+    # least 65cm away. This keeps a useful known-free margin while allowing
+    # an initially open room to begin exploration.
+    frontier_goal_standoff: 0.20
     # Was 45.0, matching nav2 controller_server's own movement_time_allowance
     # (also 45.0). That made the two timeouts a race: explore_lite's own
     # progress watchdog fired within ~1s of nav2's "Failed to make progress",

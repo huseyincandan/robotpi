@@ -1,0 +1,28 @@
+diff --git a/explore/src/explore.cpp b/explore/src/explore.cpp
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -279,9 +279,12 @@ void Explore::makePlan()
+   // make this differential-drive robot rotate in place instead of exploring.
+-  // Choose the nearest point on a suitable frontier, then stop short on the
++  // Use a suitable frontier's centroid direction, then stop short on the
+   // already-known free side of that boundary.
+   auto frontier = std::find_if_not(
+       frontiers.begin(), frontiers.end(),
+-      [this](const frontier_exploration::Frontier& f) {
++      [this, &pose](const frontier_exploration::Frontier& f) {
++        const double dx = f.centroid.x - pose.position.x;
++        const double dy = f.centroid.y - pose.position.y;
++        const double centroid_distance = std::hypot(dx, dy);
+         return goalOnBlacklist(f.centroid) ||
+-               f.min_distance < min_goal_distance_ + frontier_goal_standoff_;
++               centroid_distance < min_goal_distance_ + frontier_goal_standoff_;
+       });
+@@ -303,7 +304,7 @@ void Explore::makePlan()
+     return;
+   }
+ 
+-  geometry_msgs::msg::Point target_position = frontier->middle;
++  geometry_msgs::msg::Point target_position = frontier->centroid;
+   const double dx = target_position.x - pose.position.x;
+   const double dy = target_position.y - pose.position.y;
+   const double distance_to_boundary = std::hypot(dx, dy);
