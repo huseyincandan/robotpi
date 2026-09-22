@@ -1,0 +1,14 @@
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -302,6 +302,12 @@
+     const double distance = std::hypot(point_dx, point_dy);
+     if (distance < minimum_boundary_distance) continue;
+     const double forwardness = (point_dx * forward_x + point_dy * forward_y) / distance;
++    // This differential-drive configuration deliberately has no reverse
++    // trajectory. A rear or near-sideways frontier would make Nav2 drive
++    // forward while its goal remains behind it, so only consider a ±75°
++    // forward cone. If the cone is empty, wait for a map update instead of
++    // issuing a spin/backup-prone goal.
++    if (forwardness < 0.25) continue;
+     const double score = std::abs(distance - desired_boundary_distance) - 0.30 * forwardness;
+     if (score < best_score) {
