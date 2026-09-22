@@ -1,0 +1,92 @@
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -266,7 +266,9 @@
+     visualizeFrontiers(frontiers);
+   }
+
+-  // find non blacklisted frontier
++  // Search every ranked frontier. Restricting the search to the single
++  // lowest-cost frontier meant a rear-facing winner could suppress valid
++  // forward/side-front targets on every other frontier.
+   // A frontier centroid is on the unknown side of a free/unknown boundary.
+   // Sending that point directly gives Nav2 a goal in an inflated edge cell.
+   // It also permits tiny, sub-breakaway goals (observed at 0.15 m), which
+@@ -274,15 +276,7 @@
+   // At startup a single frontier can surround the robot, making both its
+   // centroid and nearest cell misleadingly close. Select a sufficiently far,
+   // forward-facing boundary point, then stop short on its known-free side.
+-  auto frontier = std::find_if_not(
+-      frontiers.begin(), frontiers.end(),
+-      [this](const frontier_exploration::Frontier& f) {
+-        return goalOnBlacklist(f.centroid);
+-      });
+-  if (frontier == frontiers.end()) {
+-    RCLCPP_DEBUG(logger_, "No untried frontier yet; waiting for map update.");
+-    return;
+-  }
++  auto frontier = frontiers.end();
+
+   const double minimum_boundary_distance =
+       min_goal_distance_ + frontier_goal_standoff_;
+@@ -295,28 +289,39 @@
+   const double forward_y = std::sin(heading);
+   geometry_msgs::msg::Point boundary_position;
+   double distance_to_boundary = 0.0;
+-  double best_score = std::numeric_limits<double>::infinity();
+-  for (const auto& point : frontier->points) {
+-    const double point_dx = point.x - pose.position.x;
+-    const double point_dy = point.y - pose.position.y;
+-    const double distance = std::hypot(point_dx, point_dy);
+-    if (distance < minimum_boundary_distance) continue;
+-    const double forwardness = (point_dx * forward_x + point_dy * forward_y) / distance;
+-    // This differential-drive configuration deliberately has no reverse
+-    // trajectory. A rear or near-sideways frontier would make Nav2 drive
+-    // forward while its goal remains behind it, so only consider a ±75°
+-    // forward cone. If the cone is empty, wait for a map update instead of
+-    // issuing a spin/backup-prone goal.
+-    if (forwardness < 0.25) continue;
+-    const double score = std::abs(distance - desired_boundary_distance) - 0.30 * forwardness;
+-    if (score < best_score) {
+-      best_score = score;
+-      boundary_position = point;
+-      distance_to_boundary = distance;
+-    }
+-  }
+-  if (!std::isfinite(best_score)) {
+-    RCLCPP_DEBUG(logger_, "No safe frontier point yet; waiting for map update.");
++  for (auto candidate = frontiers.begin(); candidate != frontiers.end(); ++candidate) {
++    if (goalOnBlacklist(candidate->centroid)) continue;
++
++    double best_score = std::numeric_limits<double>::infinity();
++    geometry_msgs::msg::Point candidate_boundary;
++    double candidate_distance = 0.0;
++    for (const auto& point : candidate->points) {
++      const double point_dx = point.x - pose.position.x;
++      const double point_dy = point.y - pose.position.y;
++      const double distance = std::hypot(point_dx, point_dy);
++      if (distance < minimum_boundary_distance) continue;
++      const double forwardness = (point_dx * forward_x + point_dy * forward_y) / distance;
++      // This differential-drive configuration deliberately has no reverse
++      // trajectory. A rear or near-sideways frontier would make Nav2 drive
++      // forward while its goal remains behind it, so only consider a ±75°
++      // forward cone.
++      if (forwardness < 0.25) continue;
++      const double score = std::abs(distance - desired_boundary_distance) - 0.30 * forwardness;
++      if (score < best_score) {
++        best_score = score;
++        candidate_boundary = point;
++        candidate_distance = distance;
++      }
++    }
++    if (std::isfinite(best_score)) {
++      frontier = candidate;
++      boundary_position = candidate_boundary;
++      distance_to_boundary = candidate_distance;
++      break;
++    }
++  }
++  if (frontier == frontiers.end()) {
++    RCLCPP_DEBUG(logger_, "No safe forward frontier point yet; waiting for map update.");
+     return;
+   }
+
