@@ -24,13 +24,9 @@ bt_navigator:
     # (see planner_frequency note in explore_lite_params.yaml for the other
     # half of the fix). Kept generous regardless.
     default_server_timeout: 6000
-    # Stock BT's RoundRobin recovery order is Spin -> Wait -> BackUp, and its
-    # ReactiveFallback checks GoalUpdated first each tick, which skips
-    # RecoveryActions entirely whenever explore_lite has already sent a new
-    # goal (confirmed live: recovery never ran at all, 0 spin/backup log lines
-    # despite repeated stalls). This custom tree removes that GoalUpdated
-    # preemption and reorders RecoveryActions to BackUp -> Spin -> Wait -
-    # see the file for detail.
+    # Custom bounded recovery: after a controller collision, attempt one
+    # collision-checked short BackUp and replan. If retreat is unsafe, try
+    # Spin; a still-failed goal returns to explore_lite for blacklisting.
     default_nav_to_pose_bt_xml: /home/robotpi/projects/robotpi/config/nav2_bt_recovery_backup_first.xml
 
 controller_server:
@@ -49,18 +45,9 @@ controller_server:
       plugin: "nav2_controller::PoseProgressChecker"
       required_movement_radius: 0.05
       required_movement_angle: 0.20
-      # 2026-09-17: lowered from 45.0 - the outer RecoveryNode's RoundRobin
-      # (ClearingActions->BackUp->Spin->Wait, see nav2_bt_recovery_backup_first.xml)
-      # only advances one step per "Failed to make progress" failure, so at
-      # 45.0 a genuinely wedged robot took 45-90s+ per escalation step (180s+
-      # to reach Spin/Wait) before getting real corrective action - live-
-      # observed stuck 90+s in a couch corner still cycling ClearingActions.
-      # explore_lite's own progress_timeout (120.0, see explore_lite_params.yaml)
-      # is well above this value so there's no race with the earlier
-      # 2026-09-14 halt-error fix. Lowered to 15.0 so the full escalation
-      # chain reaches BackUp within ~45s and Wait within ~75s instead of
-      # 135s/225s - needs a live retest to confirm this doesn't cause false
-      # progress-failures during legitimate slow/careful maneuvering.
+      # Detect a genuinely stalled goal within 15 s; the bounded recovery
+      # tree then makes one escape attempt before returning a second failure
+      # to explore_lite. Its 120 s watchdog remains above this allowance.
       movement_time_allowance: 15.0
 
     goal_checker:

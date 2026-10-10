@@ -28,11 +28,9 @@
     # and explore_lite immediately cancels+resends a new goal on any abort -
     # confirmed live via nav2 log: 0 "Running backup"/"Running spin" lines
     # despite repeated stalls, because explore_lite tore down the goal before
-    # nav2's BT recovery (ClearingActions -> BackUp -> Spin -> Wait) got past
-    # its first, near-instant step. Widened so nav2 gets enough headroom for
-    # at least one full recovery cycle (backup/spin/wait, a few seconds) plus
-    # a fresh 45s attempt at the retried path before explore_lite gives up on
-    # this frontier.
+    # nav2's BT recovery could run. Keep this well above Nav2's 15s progress
+    # checker so the bounded BackUp-or-Spin attempt can complete before
+    # explore_lite gives up on a frontier.
     progress_timeout: 120.0
     # Was potential_scale=3.0/gain_scale=1.0/min_frontier_size=0.2: this
     # strongly favored whichever frontier was NEAREST regardless of size,

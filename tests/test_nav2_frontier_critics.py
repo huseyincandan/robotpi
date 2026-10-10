@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import unittest
+import xml.etree.ElementTree as ET
 
 import yaml
 
@@ -42,6 +43,16 @@ class FrontierControllerConfigurationTests(unittest.TestCase):
             explore["min_goal_distance"],
             0.45,
         )
+
+    def test_collision_recovery_retreats_once_before_trying_a_turn(self):
+        root = ET.parse(ROOT / "config/nav2_bt_recovery_backup_first.xml").getroot()
+        recovery = root.find(".//RecoveryNode[@name='NavigateRecovery']")
+        self.assertIsNotNone(recovery)
+        self.assertEqual(recovery.attrib["number_of_retries"], "1")
+        escape = recovery.findall("./Sequence/Fallback")[-1]
+        self.assertEqual([node.tag for node in escape], ["BackUp", "Spin"])
+        self.assertLessEqual(float(escape[0].attrib["backup_dist"]), 0.20)
+        self.assertLessEqual(float(escape[0].attrib["backup_speed"]), 0.10)
 
 
 if __name__ == "__main__":

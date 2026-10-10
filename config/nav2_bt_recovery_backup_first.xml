@@ -1,16 +1,15 @@
 <!--
   Based on nav2_bt_navigator's stock navigate_to_pose_w_replanning_and_recovery.xml,
   with these behavior changes:
-  1) A failed FollowPath tries a collision-checked in-place Spin before retrying.
-     Automatic BackUp made the robot visibly reverse and then retry the same
-     obstructed frontier. If the spin and retry still fail, the failed goal is
-     returned to explore_lite so it can blacklist it and select another.
+  1) A failed FollowPath tries one short collision-checked BackUp before
+     replanning. This gives the robot room to turn when an obstacle is too
+     close for an in-place Spin. If BackUp itself is unsafe, Spin remains a
+     collision-checked fallback. A second FollowPath failure returns the goal
+     to explore_lite for blacklisting instead of repeating the same retreat.
   2) The stock ReactiveFallback can let GoalUpdated skip recovery as soon as
      explore_lite submits a replacement goal. This tree performs its bounded
-     spin recovery directly after a controller failure, then returns a second
-     failure to explore_lite. That gives the controller one safe reorientation
-     without repeatedly backing up or holding a blocked frontier for multiple
-     recovery cycles.
+     recovery directly after a controller failure, then returns a second
+     failure to explore_lite. This bounds recovery to one attempt per goal.
   3) 2026-09-13: added a SmoothPath step (nav2_smoother/SimpleSmoother, see
      nav2_params.yaml) right after ComputePathToPose - the raw NavFn grid path
      was being passed straight to FollowPath, and PathAlign closely tracking
@@ -28,8 +27,8 @@
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <!-- Give Nav2 one collision-checked reorientation and retry, then return a
-         still-failed goal to explore_lite so it can choose another frontier. -->
+    <!-- One recovery attempt and retry; then allow explore_lite to choose
+         another frontier if the route is still blocked. -->
     <RecoveryNode number_of_retries="1" name="NavigateRecovery">
       <Sequence name="NavigateOnceThenFollow">
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
@@ -51,10 +50,13 @@
           <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
           <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
         </Fallback>
-        <!-- One collision-checked turn, followed by a fresh plan. If that
-             retry still fails, return the goal to explore_lite; do not back up
-             or erase live obstacle observations to retry the same route. -->
-        <Spin spin_dist="0.60" error_code_id="{spin_error_code}"/>
+        <!-- Retreat 18 cm to make space before turning. BackUp checks the
+             local costmap; the motor bridge also checks rear LiDAR continuously.
+             If retreat is unsafe, try a collision-checked turn instead. -->
+        <Fallback>
+          <BackUp backup_dist="0.18" backup_speed="0.08" error_code_id="{backup_error_code}"/>
+          <Spin spin_dist="0.60" error_code_id="{spin_error_code}"/>
+        </Fallback>
       </Sequence>
     </RecoveryNode>
   </BehaviorTree>

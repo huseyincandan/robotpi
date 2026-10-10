@@ -121,3 +121,48 @@ gösterir, ancak odanın tamamının haritalandığını göstermez.
 `patches/m-explore-integrated-20261010.patch` dosyasındadır. Bu yama eski
 parçalı `m-explore-*.patch` dosyalarına ek olarak değil, temiz upstream
 forkuna tek başına uygulanır; ardından `explore_lite` yeniden derlenir.
+
+## 2026-10-10 sıfırdan oda keşfi denemesi
+
+`/map/reset` eski harita arşivlendikten sonra başarılı oldu (`odom_reset=true`,
+`outputs_ready=true`). Kullanıcının isteğiyle robot önünde 31 cm LiDAR
+açıklığı olan mevcut konumdan, Nav2 çarpışma denetimi açıkken 45 saniyelik
+gözetimli keşif yapıldı: `logs/nav2-supervised-20261010-205013`. 543 tarama,
+110 harita iletisi, 5 yol planı kaydedildi. Bilinen boş hücreler 879→5393,
+odometri yolu 3,48 m oldu. En büyük ardışık `map→odom` düzeltmesi 8,7 cm ve
+2,26° idi. İlk Nav2 hedefi tamamlandı.
+
+Denemenin sonunda ön LiDAR yaklaşık 20-23 cm ölçtü; ultrasonik yaklaşık 8 cm
+gösterdi. Nav2 denetleyicisi dört kez `detected collision ahead` dedi.
+Mevcut kurtarma ağacı her seferinde 0,60 rad Spin denedi, fakat davranış
+sunucusu `Collision Ahead - Exiting Spin` ile döngüyü reddetti. Keşif yeni
+frontier hedefleri seçse de robot o yakınlıkta ilerleyemedi. Test süresi
+dolunca keşif, motor ve Nav2 kapatıldı; motor komutu sıfır doğrulandı. Bu
+deneme sıfırdan haritanın büyüdüğünü, fakat tam oda kapsamının henüz
+doğrulanmadığını gösteriyor. Son pozda ön açıklık kritik olduğundan başka
+hareket denemesi önce güvenli geri kaçış/kurtarma tasarımı ya da fiziksel
+yeniden konumlandırma gerektirir.
+
+Bu durumdan sonra kurtarma ağacı tek bir hedef için en fazla bir kez
+çarpışma denetimli 18 cm/0,08 m/s BackUp deneyip yeniden planlayacak şekilde
+değiştirildi; geri hareket güvenli değilse 0,60 rad Spin denenir. İkinci
+FollowPath hatası hedefi explore_lite'a başarısız döndürür; fork gerçek
+Nav2 abort hata kodunu taşıyan hedefi kara listeye alır. Pi motor katmanı
+geri giderken arka LiDAR açıklığını 50 ms aralıkla ayrıca denetler.
+15 birim testi geçti ve Nav2 yeni BT ile açıldı. Canlı geri hareket testi
+henüz yapılmadı: mevcut pozda ön LiDAR ~22 cm, ultrasonik ~8 cm, dinlenme
+gerilimi ~10,96 V. Ultrasonik sensör LiDAR ile aynı yükseklikte değildir
+(kullanıcıya göre aralarında 10-12 cm var); iki değerin aynı nesneyi
+göstermesi beklenmemelidir. Şarjdan sonra arka açıklık ölçülerek kısa
+fiziksel kaçış testi yapılmalıdır.
+
+Kullanıcının düşük pille tek kısa teste onayı üzerine, mevcut pozda Nav2
+`/backup` eylemine `target.x=-0.18 m`, `speed=0.08 m/s`, `time_allowance=8 s`
+gönderildi. Eylem 2,33 s'de `SUCCEEDED`, `error_code=0` ile tamamlandı;
+geri gidilen odometri mesafesi 0,1800 m. Test öncesi arka LiDAR yaklaşık
+131 cm, ön LiDAR 22 cm; sonrası arka yaklaşık 182 cm, ön yaklaşık 29 cm
+(sektör minimumları geometri nedeniyle 18 cm bire bir değişmek zorunda
+değil). Test sonu pil 10,904 V, motor komutu sıfır; Nav2 durduruldu.
+Bu, fiziksel BackUp eylemini doğrular. Yeni BT'nin çarpışma sonrası BackUp
+dalına canlı keşifte girildiği ayrıca doğrulanmadı; şarj sonrası kısa keşif
+bu entegrasyon için gereklidir.
