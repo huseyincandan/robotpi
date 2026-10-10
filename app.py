@@ -484,13 +484,8 @@ async def _run_power_safety_watchdog():
         1,
         int(POWER_MONITOR.get("DRIVE_READ_ERROR_SAMPLES", 1))
     )
-    log_interval = max(
-        0.1,
-        float(POWER_MONITOR.get("DRIVE_LOG_INTERVAL_SECONDS", 0.25))
-    )
     low_samples = 0
     read_errors = 0
-    last_log = 0.0
     clear_samples = max(
         1,
         int(POWER_MONITOR.get("DRIVE_FAULT_CLEAR_SAMPLES", 5))
@@ -592,18 +587,6 @@ async def _run_power_safety_watchdog():
             continue
 
         read_errors = 0
-        now = time.monotonic()
-        if now - last_log >= log_interval:
-            last_log = now
-            print(
-                "POWER DRIVE:",
-                f"voltage={sample['bus_voltage']:.3f}V",
-                f"current={sample['current_ma']:.1f}mA",
-                f"power={sample['power_w']:.2f}W",
-                f"motor=({motor.current_x:.1f},{motor.current_y:.1f})",
-                flush=True
-            )
-
         if float(sample["bus_voltage"]) <= critical_voltage:
             low_samples += 1
         else:
@@ -627,10 +610,15 @@ async def _run_power_safety_watchdog():
 async def _run_map_jump_watchdog():
 
     interval = float(MAP.get("MAP_JUMP_CHECK_INTERVAL_SECONDS", 2.0))
+    gyro_sample_interval = float(MAP.get("MAP_IMU_YAW_SAMPLE_INTERVAL_SECONDS", 0.05))
     auto_recovery_enabled = bool(MAP.get("MAP_JUMP_AUTO_RECOVERY_ENABLED", False))
+    next_check_at = time.monotonic()
 
     while True:
-        await asyncio.sleep(max(0.5, interval))
+        # S3 telemetry arrives at ~10 Hz.  Polling it at 20 Hz preserves each
+        # value as a short hold and, unlike the old 0.5--1 s endpoint estimate,
+        # captures the full yaw profile of a quick Nav2 turn.
+        await asyncio.sleep(max(0.02, gyro_sample_interval))
 
         # Read gyro FIRST (not just as a fallback after a pose-jump fires) - a
         # sustained real nav2/DWB turn (confirmed live: -36%/+36% commanded for
@@ -642,8 +630,13 @@ async def _run_map_jump_watchdog():
             try:
                 sample = await asyncio.to_thread(imu.read_motion)
                 gyro_z_dps = float(sample["gyro_z"])
+                mapping.record_gyro_sample(gyro_z_dps)
             except Exception as exc:
                 print("MAP JUMP WATCHDOG: gyro read failed:", repr(exc), flush=True)
+
+        if time.monotonic() < next_check_at:
+            continue
+        next_check_at = time.monotonic() + max(0.5, interval)
 
         robot_moving = (
             abs(float(getattr(motor, "current_x", 0.0))) >= 0.5

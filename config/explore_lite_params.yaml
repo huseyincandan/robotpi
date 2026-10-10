@@ -7,36 +7,21 @@
     costmap_topic: /map
     costmap_updates_topic: /map_updates
     visualize: true
-    # Was 0.5 (re-evaluate/resend goal every 2s). Live-verified this segment
-    # (2026-08-30) via nav2 log timestamps that at 2s cadence the robot has
-    # barely moved between cycles, yet the top-ranked frontier can flip to
-    # the opposite side of the room from one cycle to the next - e.g. goal
-    # sent to (1.93,-1.10) [east] at t=162, then (-1.41,-0.89) [west] at
-    # t=166, then back to (2.19,-1.46) [east] at t=168, all while robot pose
-    # stayed near (0,-0.4). This is the exact "ileri-geri"/oscillating-goal
-    # behavior the user reported. Slowed down so the robot has real time to
-    # make progress toward a goal (and the map to meaningfully update from
-    # that progress) before the frontier ranking is re-evaluated.
-    # 2026-09-14: even at 0.15 (~6.7s), every resend preempts bt_navigator's
-    # in-flight FollowPath goal, which must halt()/cancel it first - live-
-    # reproduced twice that this cancel can fail ("Failed to get result for
-    # follow_path in node halt!", sometimes in under 1s, so it's a genuine
-    # nav2 action-handle race on this Pi, not just a slow response), and
-    # explore_lite has no automatic retry after that failure - it just stops
-    # entirely. Slowed further so each goal gets real uninterrupted time to
-    # either finish or genuinely fail on its own instead of being preempted
-    # out from under it; reduces how often this race can even be triggered.
-    # The patched completion callback waits for this timer so fresh map data
-    # is available before selecting the next frontier.
-    planner_frequency: 0.1
+    # The patched explorer leaves an active navigation goal alone, so a faster
+    # planner timer no longer preempts it. After a goal finishes, check for a
+    # fresh frontier within about two seconds instead of idling up to ten.
+    planner_frequency: 0.5
     # Ignore map-warmup fragments closer than the usable travel distance. The
     # patched explorer sends the goal this far back on the known-free side of
     # the frontier, rather than into an inflated wall/corner boundary cell.
     min_goal_distance: 0.45
-    # 20cm standoff + 45cm minimum target distance requires a frontier at
-    # least 65cm away. This keeps a useful known-free margin while allowing
-    # an initially open room to begin exploration.
-    frontier_goal_standoff: 0.20
+    # A radial standoff alone cannot ensure clearance from walls off the
+    # robot-to-frontier line. Explore also checks the actual Nav2 global
+    # costmap target cell and rejects targets above this threshold. A 100 cap
+    # avoids the high-cost inflated targets observed at 237, which made DWB
+    # prefer backing/tiny turns over forward progress.
+    frontier_goal_standoff: 0.40
+    frontier_goal_max_cost: 100
     # Was 45.0, matching nav2 controller_server's own movement_time_allowance
     # (also 45.0). That made the two timeouts a race: explore_lite's own
     # progress watchdog fired within ~1s of nav2's "Failed to make progress",

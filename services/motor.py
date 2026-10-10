@@ -1,5 +1,6 @@
 import asyncio
 import errno
+import math
 import glob
 import termios
 import threading
@@ -51,6 +52,7 @@ class MotorService:
         # UART uzerinden "TELEM ..." satiri olarak gonderiyor, burada onbelleklenir.
         self._telem_lock = threading.Lock()
         self._telem_data = None
+        self._telem_sequence = 0
 
         self._open_serial()
         self._handshake()
@@ -176,6 +178,7 @@ class MotorService:
             return
 
         with self._telem_lock:
+            self._telem_sequence += 1
             self._telem_data = {
                 "accel_x": values[0],
                 "accel_y": values[1],
@@ -187,7 +190,12 @@ class MotorService:
                 "shunt_voltage_mv": values[7],
                 "enc_rl": int(values[8]),
                 "enc_rr": int(values[9]),
-                "received_at": time.monotonic()
+                "received_at": time.monotonic(),
+                # The HTTP bridges can poll faster than S3's 50 Hz TELEM
+                # stream.  Give consumers an identity for the actual UART
+                # sample so they never interpret a cached repeat as zero wheel
+                # motion.
+                "sequence": self._telem_sequence
             }
 
     def get_telemetry(self, max_age_seconds=1.0):
@@ -213,8 +221,7 @@ class MotorService:
             if command is None:
                 continue
 
-            vx, omega = command
-            self._send_line(f"DRIVE {vx} {omega}")
+            self._send_line(command)
 
     def _send_line(self, line):
 
@@ -254,13 +261,15 @@ class MotorService:
 
         return False
 
-    def _send_drive(self, x, y):
+    def _send_drive(self, x, y, yaw_rate_dps=None):
 
         vx = int(max(-255, min(255, round(y * 2.55))))
         omega = int(max(-255, min(255, round(x * 2.55))))
 
-        sent = self._send_line(f"DRIVE {vx} {omega}")
-        self._last_drive_command = (vx, omega)
+        command = (f"DRIVE {vx} {omega}" if yaw_rate_dps is None
+                   else f"TURNRATE {vx} {yaw_rate_dps:.3f}")
+        sent = self._send_line(command)
+        self._last_drive_command = command if sent else None
 
         return sent
 
@@ -384,8 +393,14 @@ class MotorService:
         stop_distance_cm=None,
         slow_distance_cm=None,
         minimum_speed_percent=None,
-        source=None
+        source=None,
+        yaw_rate_dps=None
     ):
+
+        if yaw_rate_dps is not None:
+            if not math.isfinite(yaw_rate_dps) or abs(yaw_rate_dps) > 60 or abs(y) > 60:
+                self._stop_motor()
+                return False
 
         if source is not None:
             self.last_drive_source = str(source).strip().lower()
@@ -412,20 +427,6 @@ class MotorService:
                     slow_distance_cm=slow_distance_cm,
                     minimum_speed_percent=minimum_speed_percent
                 )
-            else:
-                nav_source = str(source).strip().lower() in {"nav2", "explore", "ros2"}
-                minimum_speed = (
-                    float(minimum_speed_percent)
-                    if minimum_speed_percent is not None
-                    else float(
-                        MOTOR.get("NAV2_MIN_FORWARD_PERCENT", ULTRASONIC["MIN_FORWARD_SPEED_PERCENT"])
-                        if nav_source
-                        else ULTRASONIC["MIN_FORWARD_SPEED_PERCENT"]
-                    )
-                )
-
-                if y < minimum_speed:
-                    y = minimum_speed
 
         if y is None:
             self.stop()
@@ -448,7 +449,7 @@ class MotorService:
         self.last_block_reason = None
 
         # Mixing artik Pi'de degil S3'un skidSteerDrive() fonksiyonunda yapiliyor.
-        if not self._send_drive(x, y):
+        if not self._send_drive(x, y, yaw_rate_dps=yaw_rate_dps):
             self.blocked = True
             self.last_block_reason = "serial"
             print("MOTOR SERIAL STOP: command not delivered", flush=True)
@@ -672,13 +673,9 @@ class MotorService:
 
             if driving_forward:
                 # Keep the command's source semantics when refreshing it for
-                # the continuous forward safety check.  In particular, Nav2
-                # commands bypass the manual ultrasonic slowdown path and are
-                # clamped to MIN_FORWARD_SPEED_PERCENT in drive().  Calling
-                # drive() without these values used the manual path instead;
-                # a 4.75% Nav2 request was then re-sent as ~4% every 50 ms,
-                # overwriting the 12% breakaway command that the original
-                # /drive?source=nav2 request had correctly produced.
+                # the continuous forward safety check. Nav2 commands bypass
+                # manual ultrasonic slowdown; its costmap handles obstacle
+                # avoidance while the close-range watchdog remains active.
                 source = self.last_drive_source
                 self.drive(
                     self.last_requested_x,

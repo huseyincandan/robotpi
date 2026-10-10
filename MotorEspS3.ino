@@ -173,16 +173,91 @@ bool gyroBiasReady = false;
 // Duz giderken sapma devam ederse Kp yukseltilebilir; duzeltme sapmayi
 // TERSINE cevirirse (kotulestiriyorsa) isaret (+/-) ters demektir, Kp'nin
 // onune eksi koy.
-const float STRAIGHT_GYRO_KP = 1.2f;       // PWM birimi / (derece/s) hata
-const int STRAIGHT_GYRO_MAX_CORRECTION = 60; // PWM birimi ust sinir
-const float STRAIGHT_GYRO_DEADBAND_DPS = 1.5f; // bu esigin altindaki sapma gyro gurultusu sayilir, duzeltme uygulanmaz
+// Gyro 50Hz okunur ve filtrelenir; hiz esitlemeyi encoder PI yapar.
+const float STRAIGHT_GYRO_KP = 0.45f;      // PWM birimi / (derece/s) hata
+const float STRAIGHT_HEADING_KP = 2.5f;    // PWM birimi / derece birikmis yon hatasi
+const int STRAIGHT_GYRO_MAX_CORRECTION = 20; // PWM birimi ust sinir
+const float STRAIGHT_GYRO_DEADBAND_DPS = 1.0f;
+const float STRAIGHT_HEADING_DEADBAND_DEG = 0.4f;
+const float STRAIGHT_HEADING_MAX_DEG = 15.0f;
+const float STRAIGHT_GYRO_FILTER_ALPHA = 0.25f;
+const unsigned long IMU_READ_INTERVAL_MS = 20;
+// A stationary window must pass encoder, acceleration and gyro checks.
+// Absolute rate limit also rejects steady rotation (low variance alone cannot).
+const unsigned long GYRO_CAL_WINDOW_MS = 2000;
+const unsigned long GYRO_CAL_SETTLE_MS = 500;
+const float GYRO_CAL_MAX_RATE_DPS = 5.0f;
+const float GYRO_CAL_MAX_SPREAD_DPS = 0.8f;
+int commandedPwmRL = 0;
+int commandedPwmRR = 0;
+unsigned long lastMotorMotionMs = 0;
+bool gyroCalibrationPending = true;
+const char *gyroCalibrationState = "waiting";
+unsigned long gyroCalStartMs = 0;
+unsigned long gyroCalLastSampleMs = 0;
+unsigned int gyroCalSamples = 0;
+float gyroCalSumZ = 0;
+float gyroCalMin[3] = {0, 0, 0};
+float gyroCalMax[3] = {0, 0, 0};
+int32_t gyroCalEncRL = 0;
+int32_t gyroCalEncRR = 0;
+
+void resetGyroCalibrationWindow() {
+  gyroCalSamples = 0;
+  gyroCalStartMs = 0;
+  gyroCalibrationState = "waiting";
+}
+
+// 2026-09-22: ayni PWM'de sag enkoderin soldan %7-%13 fazla tik urettigi
+// iki duz-surustle dogrulandi. Gyro tek basina sasinin sapmasini gec fark
+// eder; once iki tekerin ENKODER HIZINI esitleyen hizli ic dongu, onun
+// ustunde de gyro ile gercek yaw duzeltmesi kullanilir. Bu dongu sadece
+// DRIVE/FWD/BWD ile istenen duz suruste aktiftir; SET (tek teker) ve istemli
+// donuslere kesinlikle karismaz.
+const unsigned long STRAIGHT_CONTROL_INTERVAL_MS = 50;
+const float STRAIGHT_ENCODER_KP = 0.12f;       // PWM / (50ms tik farki)
+const float STRAIGHT_ENCODER_KI = 0.55f;       // PWM / (tik*saniye farki)
+const int STRAIGHT_ENCODER_MAX_CORRECTION = 40;
+bool tankDriveActive = false;
+bool straightAssistActive = false;
+int tankCommandVx = 0;
+int tankCommandOmega = 0;
+int32_t straightPrevEncRL = 0;
+int32_t straightPrevEncRR = 0;
+int32_t lastStraightDeltaRL = 0;
+int32_t lastStraightDeltaRR = 0;
+float straightEncoderIntegral = 0.0f;
+int straightEncoderCorrection = 0;
+float lastStraightGyroRateCorrection = 0.0f;
+float lastStraightHeadingCorrection = 0.0f;
+int lastStraightCorrectedOmega = 0;
+int lastStraightPwmRL = 0;
+int lastStraightPwmRR = 0;
+int lastStraightAppliedVx = 0;
+unsigned long lastStraightControlMs = 0;
+float straightHeadingErrorDeg = 0.0f;
+float lastGyroZ = 0.0f;
+bool lastGyroZValid = false;
+float lastAx = 0.0f;
+float lastAy = 0.0f;
+float lastAz = 0.0f;
+float lastGx = 0.0f;
+float lastGy = 0.0f;
+float lastRawGyroZ = 0.0f;
+unsigned long lastImuReadMs = 0;
 
 // /status uzerinden Pi'ye gec kalmadan tarayicidan pil/gerilim durumunu gormek icin son okunan deger
 float lastBusV = 0;
 float lastShuntMv = 0;
 unsigned long lastPowerReadMs = 0;
 
-const unsigned long TELEM_INTERVAL_MS = 100; // ~10Hz - Pi'nin 150-200ms komut ritmiyle catismaz
+// Encoder feedback drives the Pi's fixed-PWM pulse controller. 10 Hz left
+// each 150-PWM pulse active for at least ~100 ms, far longer than the
+// controller's 14 Hz output interval; publish at 50 Hz so the bridge can
+// close the position loop before a full high-power pulse accumulates.
+const unsigned long TELEM_INTERVAL_MS = 20;
+const unsigned long POWER_READ_INTERVAL_MS = 5000;
+const unsigned long POWER_MAX_AGE_MS = 20000;
 unsigned long lastTelemMs = 0;
 
 const unsigned long PI_CMD_TIMEOUT_MS = 250; // Pi guc/baglanti kaybinda motorlari daha hizli durdur
@@ -216,16 +291,35 @@ struct Motor {
   bool reversed; // motor karsi yonde monte edildiyse yon tersine cevrilir
 };
 
-// 2026-09-13: enkoderli motorlara gecince kablo kutuplari eskisinin tersi
-// oldu, ileri/geri komutu tum tekerlerde ters donuyordu - her iki reversed
-// bayragi da ters cevrilerek duzeltildi (RL/RR arasindaki bagil fark korunur).
-// 2026-09-13 (later): ileri/geri artik dogruydu ama sol/sag yer degistirmisti -
-// yeni motorlar TB6612'ye eski motorlarin tam tersi tarafa baglanmis (fiziksel
-// solda montajli motor RR pinlerine, sagdaki RL pinlerine kablolu). Duzeltme
-// icin pin+reversed ciftleri (fiziksel motora ait) oldugu gibi tutulup sadece
-// RL/RR etiketleri karsilikli degistirildi.
-Motor motorRL = {PIN_RR_IN1, PIN_RR_IN2, PIN_RR_PWM, true};
-Motor motorRR = {PIN_RL_IN1, PIN_RL_IN2, PIN_RL_PWM, false};
+// 2026-09-27 dusuk-PWM kalibrasyonunda TB6612 cikislari fiziksel olarak
+// degistirildi: sol motor artik A (PIN_RL), sag motor B (PIN_RR) kanalinda.
+// Havada 76 PWM testinde bu eslesme RL=~2160, RR=~2230 tik ile dengelendi.
+// Enkoder pinleri fiziksel tekerlerde oldugu icin burada yalnizca motor cikis
+// eslesmesi degisir. Iki motorun fwd kutuplulugu mevcut kablolamada dogrudur.
+Motor motorRL = {PIN_RL_IN1, PIN_RL_IN2, PIN_RL_PWM, false};
+Motor motorRR = {PIN_RR_IN1, PIN_RR_IN2, PIN_RR_PWM, false};
+
+// TURNRATE uses degrees/second with the measured gyro Z sign; DRIVE remains PWM.
+bool yawRateActive = false;
+float yawTargetDps = 0;
+float yawIntegral = 0;
+float yawOutput = 0;
+float yawErrorDps = 0;
+float yawFeedforwardPwm = 0;
+float yawRequestedPwm = 0;
+int yawVx = 0;
+unsigned long yawLastMs = 0;
+const float YAW_MAX_DPS = 60.0f;
+const float YAW_MAX_PWM = 255.0f;
+const float YAW_KP = 0.4f;
+const float YAW_KI = 0.8f;
+// The previous fixed 55-PWM feedforward produced ~18-20 dps for an 8-dps
+// target on the current wheels. Reduce the base and soften the output ramp;
+// validate these provisional values with the guarded hardware pulse test.
+const float YAW_FEEDFORWARD_BASE_PWM = 40.0f;
+const float YAW_FEEDFORWARD_PWM_PER_DPS = 0.35f;
+const float YAW_OUTPUT_SLEW_PWM_PER_SEC = 100.0f;
+const char *yawFault = "none";
 
 void motorInit(const Motor &m) {
   pinMode(m.in1, OUTPUT);
@@ -236,38 +330,60 @@ void motorInit(const Motor &m) {
 // speed: -255 (full reverse) .. 255 (full forward)
 void motorWrite(const Motor &m, int speed) {
   speed = constrain(speed, -255, 255);
+  if (m.pwm == PIN_RL_PWM) commandedPwmRL = speed;
+  if (m.pwm == PIN_RR_PWM) commandedPwmRR = speed;
+  if (speed != 0) {
+    lastMotorMotionMs = millis();
+    if (gyroCalibrationPending) resetGyroCalibrationWindow();
+  }
+  if (speed == 0) {
+    // TB6612FNG: IN1=HIGH, IN2=HIGH kisa fren; iki tekerin stopta
+    // farkli miktarda suzulup robotu dondurmesini azaltir.
+    digitalWrite(m.in1, HIGH);
+    digitalWrite(m.in2, HIGH);
+    ledcWrite(m.pwm, 255);
+    return;
+  }
   if (m.reversed) speed = -speed;
   digitalWrite(m.in1, speed > 0);
   digitalWrite(m.in2, speed < 0);
   ledcWrite(m.pwm, abs(speed));
 }
 
-// vx: ileri(+)/geri(-), omega: saat yonu(+)/tersi(-); hepsi -255..255
-// Klasik 2 tekerlekli diferansiyel surus: sol=vx-omega, sag=vx+omega.
-// The web joystick's IMU trim is also needed when Pi requests an exactly
-// straight command. A live test with the ball caster still measured about
-// -10.8 dps yaw at DRIVE vx,0; without this inner, fast correction Nav2 only
-// sees the drift after it has already curved. Never apply it to a requested
-// turn: Nav2 remains the sole owner whenever omega is non-zero.
-void driveTank(int vx, int omega, bool applyStraightGyroCorrection = true) {
-  // Sadece "duz git" niyetinde (omega=0, komutlu donus yok) gyro duzeltmesi
-  // uygula; donus komutu varken (nav2 spin dahil) karismasin diye omega!=0
-  // durumuna hic dokunulmuyor.
+void resetStraightController() {
+  noInterrupts();
+  straightPrevEncRL = encPosRL;
+  straightPrevEncRR = encPosRR;
+  interrupts();
+  straightEncoderIntegral = 0.0f;
+  straightEncoderCorrection = 0;
+  lastStraightControlMs = millis();
+  straightHeadingErrorDeg = 0.0f;
+}
+
+void applyTankDrive(int vx, int omega, int encoderCorrection = 0) {
+  int appliedVx = vx;
   int correctedOmega = omega;
-  if (applyStraightGyroCorrection && omega == 0 && vx != 0 && gyroBiasReady && mpuReady) {
-    float ax, ay, az, gx, gy, gz;
-    if (mpuReadMotion(ax, ay, az, gx, gy, gz)) {
-      float gzError = gz - gyroBiasZ;
+  float gyroRateCorrection = 0.0f;
+  float headingCorrection = 0.0f;
+  if (straightAssistActive && omega == 0 && vx != 0) {
+    if (gyroBiasReady && lastGyroZValid) {
+      float gzError = lastGyroZ - gyroBiasZ;
       if (fabs(gzError) >= STRAIGHT_GYRO_DEADBAND_DPS) {
-        float correction = -STRAIGHT_GYRO_KP * gzError;
-        correction = constrain(correction, -STRAIGHT_GYRO_MAX_CORRECTION, STRAIGHT_GYRO_MAX_CORRECTION);
-        correctedOmega = (int) correction;
+        gyroRateCorrection = -STRAIGHT_GYRO_KP * gzError;
+      }
+      if (fabs(straightHeadingErrorDeg) >= STRAIGHT_HEADING_DEADBAND_DEG) {
+        headingCorrection = -STRAIGHT_HEADING_KP * straightHeadingErrorDeg;
       }
     }
+    float gyroCorrection = constrain(gyroRateCorrection + headingCorrection,
+                                     -STRAIGHT_GYRO_MAX_CORRECTION,
+                                     STRAIGHT_GYRO_MAX_CORRECTION);
+    correctedOmega = (int) (gyroCorrection + encoderCorrection);
   }
 
-  int rawL = vx - correctedOmega;
-  int rawR = vx + correctedOmega;
+  int rawL = appliedVx - correctedOmega;
+  int rawR = appliedVx + correctedOmega;
 
   int maxMag = max(abs(rawL), abs(rawR));
   if (maxMag > 255) {
@@ -275,12 +391,169 @@ void driveTank(int vx, int omega, bool applyStraightGyroCorrection = true) {
     rawR = rawR * 255 / maxMag;
   }
 
+  lastStraightGyroRateCorrection = gyroRateCorrection;
+  lastStraightHeadingCorrection = headingCorrection;
+  lastStraightCorrectedOmega = correctedOmega;
+  lastStraightPwmRL = rawL;
+  lastStraightPwmRR = rawR;
+  lastStraightAppliedVx = appliedVx;
+
   motorWrite(motorRL, rawL);
   motorWrite(motorRR, rawR);
 }
 
+// vx: ileri(+)/geri(-), omega: sola/CCW(+), saga/CW(-); hepsi -255..255.
+// Yeni komut sadece hedefi kaydeder; pollStraightDriveControl() 20Hz'de
+// enkoder farkini kapatarak motor cikisini surekli gunceller.
+void driveTank(int vx, int omega, bool applyStraightGyroCorrection = true) {
+  yawRateActive = false;
+  yawTargetDps = 0; yawOutput = 0; yawIntegral = 0;
+  vx = constrain(vx, -255, 255);
+  omega = constrain(omega, -255, 255);
+  if (vx == 0 && omega == 0) {
+    tankDriveActive = false;
+    straightAssistActive = false;
+    lastStraightAppliedVx = 0;
+    motorWrite(motorRL, 0);
+    motorWrite(motorRR, 0);
+    return;
+  }
+
+  bool nextStraightAssist = applyStraightGyroCorrection && omega == 0 && vx != 0;
+  // Pi/web keep-alive komutlari ayni duz-surus niyetini siklikla tekrarlar
+  // ve guvenlik katmani PWM buyuklugunu kucuk miktarlarda degistirebilir.
+  // Bunlar PI durumunu sifirlamamali: aksi halde her yeni DRIVE, onceki
+  // encoder duzeltmesini silip tekerleri yeniden esit PWM'e dondurur.
+  bool directionChanged = (vx > 0) != (tankCommandVx > 0);
+  if (!tankDriveActive || directionChanged ||
+      nextStraightAssist != straightAssistActive) {
+    resetStraightController();
+  }
+  tankDriveActive = true;
+  straightAssistActive = nextStraightAssist;
+  tankCommandVx = vx;
+  tankCommandOmega = omega;
+  applyTankDrive(vx, omega,
+                 nextStraightAssist ? straightEncoderCorrection : 0);
+}
+
+void disableTankDrive() {
+  yawRateActive = false;
+  tankDriveActive = false;
+  straightAssistActive = false;
+  straightEncoderIntegral = 0.0f;
+  straightEncoderCorrection = 0;
+  straightHeadingErrorDeg = 0.0f;
+}
+
+void pollStraightDriveControl() {
+  if (!tankDriveActive || !straightAssistActive || tankCommandVx == 0) return;
+  unsigned long now = millis();
+  unsigned long elapsedMs = now - lastStraightControlMs;
+  if (elapsedMs < STRAIGHT_CONTROL_INTERVAL_MS) return;
+  lastStraightControlMs = now;
+
+  int32_t encRL, encRR;
+  noInterrupts();
+  encRL = encPosRL;
+  encRR = encPosRR;
+  interrupts();
+
+  int32_t deltaRL = encRL - straightPrevEncRL;
+  int32_t deltaRR = encRR - straightPrevEncRR;
+  straightPrevEncRL = encRL;
+  straightPrevEncRR = encRR;
+  lastStraightDeltaRL = deltaRL;
+  lastStraightDeltaRR = deltaRR;
+
+  // r-l farkinin isareti ileri/geri harekette de dogrudan istenen omega
+  // isaretidir; sag fazla donerse negatif omega sol PWM'yi artirip sag
+  // PWM'yi azaltir.
+  float tickDifference = (float) (deltaRR - deltaRL);
+  float dtSec = elapsedMs / 1000.0f;
+  straightEncoderIntegral += tickDifference * dtSec;
+  straightEncoderIntegral = constrain(straightEncoderIntegral, -40.0f, 40.0f);
+  float correction = -STRAIGHT_ENCODER_KP * tickDifference
+                   - STRAIGHT_ENCODER_KI * straightEncoderIntegral;
+  correction = constrain(correction,
+                         -STRAIGHT_ENCODER_MAX_CORRECTION,
+                         STRAIGHT_ENCODER_MAX_CORRECTION);
+  straightEncoderCorrection = (int) correction;
+  applyTankDrive(tankCommandVx, tankCommandOmega, straightEncoderCorrection);
+}
+
 void stopAll() {
   driveTank(0, 0);
+}
+
+bool driveYawRate(int vx, float rate) {
+  if (!isfinite(rate) || fabs(rate) > YAW_MAX_DPS || abs(vx) > 155) {
+    stopAll(); yawFault = "invalid_target"; return false;
+  }
+  if (!mpuReady || !gyroBiasReady || !lastGyroZValid ||
+      millis() - lastImuReadMs > 100) {
+    stopAll(); yawFault = "imu_unavailable"; return false;
+  }
+  yawFault = "none";
+  if (fabs(rate) < 0.1f) {
+    driveTank(vx, 0, true);
+    yawTargetDps = 0; yawOutput = 0; yawIntegral = 0;
+    return true;
+  }
+  bool restart = !yawRateActive || (rate > 0) != (yawTargetDps > 0);
+  disableTankDrive();
+  yawRateActive = true;
+  yawTargetDps = rate; yawVx = vx;
+  if (restart) {
+    yawIntegral = 0; yawOutput = 0; yawLastMs = millis();
+    motorWrite(motorRL, 0); motorWrite(motorRR, 0);
+  }
+  return true;
+}
+
+void pollYawRateControl() {
+  if (!yawRateActive) return;
+  unsigned long now = millis();
+  if (!mpuReady || !gyroBiasReady || !lastGyroZValid || now - lastImuReadMs > 100) {
+    stopAll(); yawFault = "imu_unavailable"; return;
+  }
+  unsigned long elapsed = now - yawLastMs;
+  if (elapsed < 20) return;
+  if (elapsed > 150) { stopAll(); yawFault = "control_gap"; return; }
+  yawLastMs = now;
+  float dt = elapsed / 1000.0f;
+  float error = yawTargetDps - (lastGyroZ - gyroBiasZ);
+  yawErrorDps = error;
+  float candidate = constrain(yawIntegral + YAW_KI * error * dt, -60.0f, 60.0f);
+  float feedforward = copysignf(YAW_FEEDFORWARD_BASE_PWM, yawTargetDps)
+                    + YAW_FEEDFORWARD_PWM_PER_DPS * yawTargetDps;
+  yawFeedforwardPwm = feedforward;
+  float requested = feedforward + YAW_KP * error + candidate;
+  // Conditional integration prevents windup at the PWM limit.
+  if (fabs(requested) < YAW_MAX_PWM || requested * error < 0) yawIntegral = candidate;
+  requested = constrain(feedforward + YAW_KP * error + yawIntegral, -YAW_MAX_PWM, YAW_MAX_PWM);
+  // No reverse torque during a turn; STOP still applies the hardware brake immediately.
+  if (requested * yawTargetDps < 0) requested = 0;
+  yawRequestedPwm = requested;
+  yawOutput += constrain(requested - yawOutput,
+                          -YAW_OUTPUT_SLEW_PWM_PER_SEC * dt,
+                          YAW_OUTPUT_SLEW_PWM_PER_SEC * dt);
+  applyTankDrive(yawVx, (int) roundf(yawOutput));
+}
+
+void handleYawRate() {
+  if (!server.hasArg("vx") || !server.hasArg("dps")) {
+    server.send(400, "text/plain", "ERR missing vx/dps"); return;
+  }
+  char *end;
+  String rateText = server.arg("dps");
+  float rate = strtof(rateText.c_str(), &end);
+  if (end == rateText.c_str() || *end != '\0') {
+    stopAll(); server.send(400, "text/plain", "ERR invalid rate"); return;
+  }
+  bool ok = driveYawRate(server.arg("vx").toInt(), rate);
+  lastCmdWasWeb = true; lastWebCmdMs = millis();
+  server.send(ok ? 200 : 409, "text/plain", ok ? "OK" : yawFault);
 }
 
 // dir: "fwd" ileri, "bwd" geri, herhangi baska deger dur
@@ -305,6 +578,8 @@ button{font-size:15px;padding:10px 12px;margin:3px;border:none;border-radius:6px
 .bwd{background:#c62828;color:#fff}
 .stop{background:#555;color:#fff}
 .stopall{background:#b71c1c;color:#fff;font-size:18px;padding:14px 28px;margin-top:10px}
+.drive-controls{display:grid;grid-template-columns:1fr 1fr;gap:8px;max-width:420px;margin:20px auto 0}
+.drive-controls button{font-size:15px;padding:14px 8px}
 .joy-wrap{margin:20px auto}
 .joy-base{position:relative;width:180px;height:180px;background:#333;border-radius:50%;margin:10px auto;touch-action:none}
 .joy-stick{position:absolute;width:70px;height:70px;background:#1976d2;border-radius:50%;top:55px;left:55px}
@@ -319,6 +594,12 @@ button{font-size:15px;padding:10px 12px;margin:3px;border:none;border-radius:6px
 <div class="joy-wrap"><h2>Joystick</h2>
 <div id="joyBase" class="joy-base"><div id="joyStick" class="joy-stick"></div></div>
 <div id="joyDbg" style="font-size:13px;color:#999"></div>
+</div>
+<div class="drive-controls">
+<button class="fwd" id="drive_fwd">ILERI (DOGRUDAN)</button>
+<button class="bwd" id="drive_bwd">GERI (DOGRUDAN)</button>
+<button class="fwd" id="drive_corrected_fwd">DUZELTMELI ILERI</button>
+<button class="bwd" id="drive_corrected_bwd">DUZELTMELI GERI</button>
 </div>
 <div class="grid">
 <div class="panel"><h2>Sol Teker</h2>
@@ -360,6 +641,35 @@ function bindHold(id,motor,dir){
   bindHold(m+'_fwd',m,'fwd');
   bindHold(m+'_bwd',m,'bwd');
 });
+
+function sendTank(vx,assist){fetch(`/drive?vx=${vx}&omega=0&assist=${assist?1:0}`).catch(()=>{});}
+function bindDriveHold(id,vx,assist){
+  const el=document.getElementById(id);
+  let activePointerId=null, keepAliveTimer=null;
+  const start=(e)=>{
+    e.preventDefault();
+    activePointerId=e.pointerId;
+    el.setPointerCapture(e.pointerId);
+    sendTank(vx,assist);
+    if(keepAliveTimer) clearInterval(keepAliveTimer);
+    keepAliveTimer=setInterval(()=>sendTank(vx,assist),100);
+  };
+  const stop=(e)=>{
+    if(activePointerId===null || e.pointerId!==activePointerId) return;
+    e.preventDefault();
+    clearInterval(keepAliveTimer);
+    keepAliveTimer=null;
+    activePointerId=null;
+    sendTank(0,assist);
+  };
+  el.addEventListener('pointerdown',start);
+  el.addEventListener('pointerup',stop);
+  el.addEventListener('pointercancel',stop);
+}
+bindDriveHold('drive_fwd',150,false);
+bindDriveHold('drive_bwd',-150,false);
+bindDriveHold('drive_corrected_fwd',150,true);
+bindDriveHold('drive_corrected_bwd',-150,true);
 
 const batteryInfo=document.getElementById('batteryInfo');
 function loadBattery(){
@@ -461,7 +771,14 @@ void handleSet() {
     return;
   }
   String dir = server.arg("dir");
-  int speed = (dir == "fwd") ? WEB_SPEED : (dir == "bwd") ? -WEB_SPEED : 0;
+  // Kontrol paneli speed gondermez ve WEB_SPEED'i kullanmaya devam eder.
+  // Teshis/calibration icin ise /set?motor=RL&dir=fwd&speed=76 ile tam PWM
+  // degeri verilebilir; tek-teker komutu tank/gyro kontrolunden bagimsizdir.
+  int speedMag = server.hasArg("speed")
+      ? constrain(server.arg("speed").toInt(), 0, 255)
+      : WEB_SPEED;
+  int speed = (dir == "fwd") ? speedMag : (dir == "bwd") ? -speedMag : 0;
+  disableTankDrive(); // tek-teker testini 50Hz tank kontrolu ezmesin
   motorWrite(*m, speed);
   lastCmdWasWeb = true; // Pi zaman asimi bu komutu durdurmasin
   lastWebCmdMs = millis(); // web bekcisi: bu komuttan itibaren say
@@ -476,11 +793,34 @@ void handleStopAll() {
 }
 
 void handleStatus() {
-  char buf[220];
+  char buf[900];
   snprintf(buf, sizeof(buf),
-           "bootCount=%d lastResetReason=%d uptimeMs=%lu busV=%.3f shuntMv=%.3f powerAgeMs=%lu\n",
+           "bootCount=%d lastResetReason=%d uptimeMs=%lu busV=%.3f shuntMv=%.3f powerAgeMs=%lu "
+           "straightActive=%d encoderCorrection=%d encoderDeltaRL=%ld encoderDeltaRR=%ld "
+           "filteredGyroZ=%.3f gyroBiasZ=%.3f imuAgeMs=%lu headingErrorDeg=%.3f "
+           "gyroRateCorrection=%.3f headingCorrection=%.3f "
+           "correctedOmega=%d appliedVx=%d pwmRL=%d pwmRR=%d "
+           "rawGyroZ=%.3f correctedGyroZ=%.3f gyroBiasReady=%d "
+           "gyroCalibration=%s gyroCalSamples=%u imuValid=%d "
+           "yawActive=%d yawTargetDps=%.3f yawMeasuredDps=%.3f yawErrorDps=%.3f "
+           "yawFeedforwardPwm=%.2f yawIntegralPwm=%.2f yawRequestedPwm=%.2f "
+           "yawOutput=%.2f yawPwmRL=%d yawPwmRR=%d yawFault=%s\n",
            bootCount, lastResetReason, millis(), lastBusV, lastShuntMv,
-           lastPowerReadMs == 0 ? 0 : millis() - lastPowerReadMs);
+           lastPowerReadMs == 0 ? 0 : millis() - lastPowerReadMs,
+           straightAssistActive, straightEncoderCorrection,
+           (long) lastStraightDeltaRL, (long) lastStraightDeltaRR,
+           lastGyroZ, gyroBiasZ,
+           lastImuReadMs == 0 ? 0 : millis() - lastImuReadMs,
+           straightHeadingErrorDeg,
+           lastStraightGyroRateCorrection, lastStraightHeadingCorrection,
+           lastStraightCorrectedOmega, lastStraightAppliedVx,
+           commandedPwmRL, commandedPwmRR,
+           lastRawGyroZ, gyroBiasReady ? lastRawGyroZ - gyroBiasZ : NAN,
+           gyroBiasReady, gyroCalibrationState, gyroCalSamples,
+           mpuReady && lastGyroZValid && millis() - lastImuReadMs <= 100,
+           yawRateActive, yawTargetDps, lastGyroZ - gyroBiasZ, yawErrorDps,
+           yawFeedforwardPwm, yawIntegral, yawRequestedPwm, yawOutput,
+           commandedPwmRL, commandedPwmRR, yawFault);
   server.send(200, "text/plain", buf);
 }
 
@@ -489,7 +829,7 @@ void handleStatus() {
 void handlePower() {
   unsigned long ageMs = lastPowerReadMs == 0 ? 0xFFFFFFFF : millis() - lastPowerReadMs;
 
-  if (!inaReady || lastPowerReadMs == 0 || ageMs > 2000) {
+  if (!inaReady || lastPowerReadMs == 0 || ageMs > POWER_MAX_AGE_MS) {
     server.send(200, "application/json", "{\"status\":\"ERROR\"}");
     return;
   }
@@ -536,6 +876,7 @@ body{font-family:sans-serif;text-align:center;background:#111;color:#eee}
 h1{margin-top:20px;font-size:20px}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:420px;margin:20px auto}
 .pin{background:#222;border-radius:10px;padding:16px}
+.difference{grid-column:1/-1}
 .pin .num{font-size:13px;color:#999}
 .pin .val{font-size:32px;font-weight:bold;margin-top:6px}
 button{font-size:16px;padding:12px 24px;margin-top:10px;border:none;border-radius:6px;cursor:pointer;background:#b71c1c;color:#fff}
@@ -545,6 +886,7 @@ a{color:#1976d2}
 <div class="grid">
 <div class="pin"><div class="num">Sol Teker (RL, GPIO 37/38)</div><div class="val" id="vRL">0</div></div>
 <div class="pin"><div class="num">Sag Teker (RR, GPIO 39/40)</div><div class="val" id="vRR">0</div></div>
+<div class="pin difference"><div class="num">Enkoder Yuzde Farki</div><div class="val" id="vDiff">0.0%</div></div>
 </div>
 <button onclick="fetch('/encreset')">SIFIRLA</button>
 <p><a href="/">Kontrol paneline don</a></p>
@@ -553,11 +895,20 @@ async function poll(){
   try{
     const r=await fetch('/encvalues');
     const t=await r.text();
+    const values={};
     t.trim().split(' ').forEach(pair=>{
       const [name,val]=pair.split('=');
       const el=document.getElementById('v'+name);
-      if(el) el.textContent=val;
+      if(el){
+        el.textContent=val;
+        values[name]=Number(val);
+      }
     });
+    if(Number.isFinite(values.RL) && Number.isFinite(values.RR)){
+      const average=(Math.abs(values.RL)+Math.abs(values.RR))/2;
+      const percent=average===0 ? 0 : Math.abs(values.RL-values.RR)/average*100;
+      document.getElementById('vDiff').textContent=percent.toFixed(1)+'%';
+    }
   }catch(e){}
 }
 setInterval(poll,300);
@@ -578,7 +929,8 @@ void handleDrive() {
   }
   int vx = constrain(server.arg("vx").toInt(), -255, 255);
   int omega = constrain(server.arg("omega").toInt(), -255, 255);
-  driveTank(vx, omega);
+  bool applyStraightCorrection = !server.hasArg("assist") || server.arg("assist") != "0";
+  driveTank(vx, omega, applyStraightCorrection);
   lastCmdWasWeb = true; // Pi zaman asimi bu komutu durdurmasin
   lastWebCmdMs = millis(); // web bekcisi: bu komuttan itibaren say
   server.send(200, "text/plain", "OK");
@@ -624,29 +976,77 @@ bool mpuReadMotion(float &ax, float &ay, float &az, float &gx, float &gy, float 
   return true;
 }
 
-// Acilista (robot hareketsizken) gyro_z sapmasini olcup gyroBiasZ'e yazar -
-// bu yapilmazsa duz-git duzeltmesi (driveTank icindeki gzError) sensorun
-// dinlenme sapmasini gercek donus sanip surekli gereksiz duzeltme uygular.
-// MPU henuz hazir degilse sessizce atlanir - o zaman gyroBiasZ 0 kalir,
-// sonraki uptime boyunca tekrar denenmez (nadir durum, yeniden acilista duzelir).
-void calibrateGyroBias() {
-  if (!mpuReady) return;
-  const int SAMPLES = 40;
-  float sum = 0;
-  int ok = 0;
-  for (int i = 0; i < SAMPLES; i++) {
-    float ax, ay, az, gx, gy, gz;
-    if (mpuReadMotion(ax, ay, az, gx, gy, gz)) {
-      sum += gz;
-      ok++;
+// Non-blocking: the main loop continues serving commands and watchdogs.
+bool calibrateGyroBias() {
+  if (commandedPwmRL != 0 || commandedPwmRR != 0) return false;
+  gyroBiasReady = false;
+  gyroCalibrationPending = true;
+  resetGyroCalibrationWindow();
+  lastMotorMotionMs = millis();
+  return true;
+}
+
+void updateGyroCalibration(float ax, float ay, float az,
+                           float gx, float gy, float gz, unsigned long now) {
+  if (!gyroCalibrationPending) return;
+  int32_t rl, rr;
+  noInterrupts();
+  rl = encPosRL;
+  rr = encPosRR;
+  interrupts();
+  float accelSquared = ax * ax + ay * ay + az * az;
+  if (commandedPwmRL != 0 || commandedPwmRR != 0 ||
+      now - lastMotorMotionMs < GYRO_CAL_SETTLE_MS ||
+      !isfinite(accelSquared) || !isfinite(gx) || !isfinite(gy) || !isfinite(gz) ||
+      accelSquared < 0.85f * 0.85f || accelSquared > 1.15f * 1.15f ||
+      fabs(gx) > GYRO_CAL_MAX_RATE_DPS || fabs(gy) > GYRO_CAL_MAX_RATE_DPS ||
+      fabs(gz) > GYRO_CAL_MAX_RATE_DPS) {
+    resetGyroCalibrationWindow();
+    return;
+  }
+  if (gyroCalSamples && (rl != gyroCalEncRL || rr != gyroCalEncRR ||
+                         now - gyroCalLastSampleMs > 100)) {
+    resetGyroCalibrationWindow();
+    return;
+  }
+  float rates[3] = {gx, gy, gz};
+  if (gyroCalSamples == 0) {
+    gyroCalStartMs = now;
+    gyroCalEncRL = rl;
+    gyroCalEncRR = rr;
+    gyroCalSumZ = 0;
+    for (int i = 0; i < 3; ++i) gyroCalMin[i] = gyroCalMax[i] = rates[i];
+  }
+  for (int i = 0; i < 3; ++i) {
+    gyroCalMin[i] = min(gyroCalMin[i], rates[i]);
+    gyroCalMax[i] = max(gyroCalMax[i], rates[i]);
+    if (gyroCalMax[i] - gyroCalMin[i] > GYRO_CAL_MAX_SPREAD_DPS) {
+      resetGyroCalibrationWindow();
+      return;
     }
-    delay(5);
   }
-  if (ok > 0) {
-    gyroBiasZ = sum / ok;
+  gyroCalibrationState = "collecting";
+  gyroCalLastSampleMs = now;
+  gyroCalSumZ += gz;
+  ++gyroCalSamples;
+  if (now - gyroCalStartMs >= GYRO_CAL_WINDOW_MS && gyroCalSamples >= 80) {
+    gyroBiasZ = gyroCalSumZ / gyroCalSamples;
     gyroBiasReady = true;
+    gyroCalibrationPending = false;
+    gyroCalibrationState = "ready";
+    lastGyroZ = gz;
+    straightHeadingErrorDeg = 0;
+    Serial.printf("GYRO BIAS Z: %.3f dps (%u stationary samples)\n",
+                  gyroBiasZ, gyroCalSamples);
   }
-  Serial.printf("GYRO BIAS Z: %.3f dps (%d/%d ornek)\n", gyroBiasZ, ok, SAMPLES);
+}
+
+void handleGyroCalibrate() {
+  if (!calibrateGyroBias()) {
+    server.send(409, "text/plain", "ERR motors active");
+    return;
+  }
+  server.send(202, "text/plain", "OK calibration pending; keep robot stationary");
 }
 
 // INA219'dan bus voltaji (V) + shunt voltaji (mV) okur - akim hesabi (shunt_ohms gerektirir)
@@ -685,6 +1085,9 @@ void initSensors() {
     float v, s;
     if (inaReadPower(v, s)) {
       inaReady = true;
+      lastBusV = v;
+      lastShuntMv = s;
+      lastPowerReadMs = millis();
       Serial.println("INA219 HAZIR");
     } else {
       Serial.println("INA219 bulunamadi, tekrar denenecek");
@@ -692,8 +1095,58 @@ void initSensors() {
   }
 }
 
-// TELEM_INTERVAL_MS'de bir Pi'ye "TELEM ax ay az gx gy gz busV shuntMv encRL encRR" satiri gonderir;
-// okuma basarisiz olursa o dongude hic satir gonderilmez (Pi tarafi bunu bayatlik/timeout ile anlar).
+void pollImu() {
+  if (!ENABLE_TELEMETRY || !mpuReady) return;
+  unsigned long now = millis();
+  if (now - lastImuReadMs < IMU_READ_INTERVAL_MS) return;
+
+  unsigned long previousReadMs = lastImuReadMs;
+  float ax, ay, az, gx, gy, gz;
+  if (!mpuReadMotion(ax, ay, az, gx, gy, gz)) {
+    mpuReady = false;
+    lastGyroZValid = false;
+    gyroBiasReady = false;
+    gyroCalibrationPending = true;
+    resetGyroCalibrationWindow();
+    return;
+  }
+  lastImuReadMs = now;
+  lastAx = ax;
+  lastAy = ay;
+  lastAz = az;
+  lastGx = gx;
+  lastGy = gy;
+  lastRawGyroZ = gz;
+  if (!lastGyroZValid) lastGyroZ = gz;
+  else lastGyroZ += STRAIGHT_GYRO_FILTER_ALPHA * (gz - lastGyroZ);
+  lastGyroZValid = true;
+
+  updateGyroCalibration(ax, ay, az, gx, gy, gz, now);
+  if (tankDriveActive && straightAssistActive && gyroBiasReady && previousReadMs != 0) {
+    float dtSec = (now - previousReadMs) / 1000.0f;
+    straightHeadingErrorDeg += (lastGyroZ - gyroBiasZ) * dtSec;
+    straightHeadingErrorDeg = constrain(straightHeadingErrorDeg,
+                                        -STRAIGHT_HEADING_MAX_DEG,
+                                        STRAIGHT_HEADING_MAX_DEG);
+  }
+}
+
+void pollPower() {
+  if (!ENABLE_TELEMETRY || !inaReady) return;
+  unsigned long now = millis();
+  if (lastPowerReadMs != 0 && now - lastPowerReadMs < POWER_READ_INTERVAL_MS) return;
+
+  float busV, shuntMv;
+  if (!inaReadPower(busV, shuntMv)) {
+    inaReady = false;
+    return;
+  }
+  lastBusV = busV;
+  lastShuntMv = shuntMv;
+  lastPowerReadMs = now;
+}
+
+// Onbellekteki son sensor degerlerini TELEM_INTERVAL_MS'de bir Pi'ye gonderir.
 // encRL/encRR: 2026-09-13'te eklenen kadranaj (quadrature) enkoderlerin kumulatif tik sayaclari -
 // navigasyonda gercek tekerlek odometrisi icin kullanilir (bkz. services/motor.py _parse_telemetry,
 // scripts/ros2_cmdvel_bridge.py encoder-based odom).
@@ -708,31 +1161,22 @@ void pollTelemetry() {
 
   if (now - lastTelemMs < TELEM_INTERVAL_MS) return;
   lastTelemMs = now;
-
-  float ax, ay, az, gx, gy, gz, busV, shuntMv;
-  bool mpuOk = mpuReady && mpuReadMotion(ax, ay, az, gx, gy, gz);
-  bool inaOk = inaReady && inaReadPower(busV, shuntMv);
-
-  if (!mpuOk) mpuReady = false; // bir sonraki dongude initSensors tekrar dener
-  if (!inaOk) inaReady = false;
-
-  if (!mpuOk || !inaOk) return; // eksik veri gonderilmez
-
-  lastBusV = busV;
-  lastShuntMv = shuntMv;
-  lastPowerReadMs = now;
+  if (!mpuReady || !inaReady || !lastGyroZValid || lastPowerReadMs == 0) return;
 
   // encPosRL/encPosRR: 32-bit hizalanmis okuma tek instruction'da atomik (ISR yari yolda
   // kesmez), pollEncoderDebug()/handleEncValues() de ayni sekilde kilitsiz okuyor.
   PiSerial.printf("TELEM %.4f %.4f %.4f %.3f %.3f %.3f %.4f %.3f %ld %ld\n",
-                  ax, ay, az, gx, gy, gz, busV, shuntMv,
+                  lastAx, lastAy, lastAz, lastGx, lastGy, lastRawGyroZ,
+                  lastBusV, lastShuntMv,
                   (long) encPosRL, (long) encPosRR);
 }
 
 // Pi'den gelen satir tabanli komutlari isle. Desteklenen komutlar:
+//   TURNRATE <vx_pwm> <gyro_z_dps> - gyro feedback, +/-60 dps, vx +/-155
 //   DRIVE <vx> <omega>  - genel karisik surus, ileri/geri + donus (-255..255)
 //   FWD [hiz]  BWD [hiz]  LEFT [hiz]  RIGHT [hiz]  - temel yon komutlari (hiz verilmezse WEB_SPEED kullanilir)
 //   SET <motor> <fwd|bwd|stop> [hiz]  - tek tekeri dogrudan kontrol et (motor: RL/RR, hiz: 0-255, verilmezse WEB_SPEED)
+//   GYRO_CALIBRATE - motorlar duruyorsa hareketsizlik dogrulamali kalibrasyon
 //   STOP  - tum motorlari durdur
 //   PING  - baglanti testi, PONG doner
 //   TESTMODE <timeout_ms> <sure_s>  - kontrol/donus testleri icin komut zaman asimini gecici uzatir
@@ -741,7 +1185,7 @@ void pollTelemetry() {
 //   TESTMODE_OFF  - test modunu hemen kapatip normal 250ms zaman asimina doner
 // Her komuta "OK"/"ERR ..." veya ilgili yanit satiri ile cevap verilir.
 // Pi hem UART (PiSerial) hem de USB (Serial) uzerinden baglanabilir; cevap komutun geldigi akisa yazilir.
-// Ayrica: Pi'nin istegi disinda, S3 PiSerial'a ~10Hz "TELEM ..." satiri gonderir
+// Ayrica: Pi'nin istegi disinda, S3 PiSerial'a 50Hz "TELEM ..." satiri gonderir
 // (bkz. pollTelemetry()) - bu bir komut CEVABI degildir, Pi tarafi bunu asenkron
 // olarak dinleyip ayristirir (services/motor.py _serial_reader_loop).
 void handlePiCommand(String line, Stream &out) {
@@ -759,6 +1203,14 @@ void handlePiCommand(String line, Stream &out) {
   } else if (cmd == "STOP") {
     stopAll();
     out.println("OK");
+  } else if (cmd == "GYRO_CALIBRATE") {
+    out.println(calibrateGyroBias() ? "OK calibration pending" : "ERR motors active");
+  } else if (cmd == "TURNRATE") {
+    int vx; float rate; char extra;
+    if (sscanf(rest.c_str(), "%d %f %c", &vx, &rate, &extra) != 2) {
+      stopAll(); out.println("ERR invalid target"); return;
+    }
+    out.println(driveYawRate(vx, rate) ? "OK" : "ERR yaw control");
   } else if (cmd == "DRIVE") {
     int sp2 = rest.indexOf(' ');
     if (sp2 == -1) { out.println("ERR eksik parametre"); return; }
@@ -784,6 +1236,7 @@ void handlePiCommand(String line, Stream &out) {
     // opsiyonel hiz (0-255): "SET FL fwd 80" gibi, verilmezse WEB_SPEED kullanilir
     int speedMag = (sp3 == -1) ? WEB_SPEED : constrain(rest2.substring(sp3 + 1).toInt(), 0, 255);
     int speed = (dir == "fwd") ? speedMag : (dir == "bwd") ? -speedMag : 0;
+    disableTankDrive(); // tek-teker UART komutu tank kontrolunden bagimsizdir
     motorWrite(*m, speed);
     out.println("OK");
   } else if (cmd == "TESTMODE") {
@@ -850,20 +1303,21 @@ void setup() {
   Serial.printf("ACILIS - reset nedeni: %d, bootCount=%d\n", lastResetReason, bootCount);
   PiSerial.begin(PI_UART_BAUD, SERIAL_8N1, PIN_PI_UART_RX, PIN_PI_UART_TX); // Pi 5 UART hatti
 
-  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-  Wire.setClock(100000); // Pi'deki EMI arastirmasinda da 100kHz kullanildi, tutarlilik icin ayni
-  if (ENABLE_TELEMETRY) initSensors();
-  calibrateGyroBias(); // robot bu noktada hareketsiz varsayilir (acilis)
-
-  neopixelWrite(RGB_BUILTIN, 0, 0, 0); // LED kapali kalsin
-
+  // Brake before sensor initialization/calibration; keep the driver disabled
+  // until both motor outputs have been configured.
   pinMode(PIN_STBY, OUTPUT);
-  digitalWrite(PIN_STBY, HIGH); // enable both TB6612 drivers
-
+  digitalWrite(PIN_STBY, LOW);
   motorInit(motorRL);
   motorInit(motorRR);
   encoderInit();
-  stopAll(); // web arayuzunden komut gelene kadar dur
+  stopAll();
+  digitalWrite(PIN_STBY, HIGH);
+
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+  Wire.setClock(100000);
+  if (ENABLE_TELEMETRY) initSensors();
+  calibrateGyroBias(); // samples collected later by pollImu(), without blocking
+  neopixelWrite(RGB_BUILTIN, 0, 0, 0);
 
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(HOSTNAME);
@@ -905,7 +1359,9 @@ void setup() {
   server.on("/set", handleSet);
   server.on("/stopall", handleStopAll);
   server.on("/drive", handleDrive);
+  server.on("/turnrate", handleYawRate);
   server.on("/status", handleStatus);
+  server.on("/gyro/calibrate", HTTP_POST, handleGyroCalibrate);
   server.on("/power", handlePower);
   server.on("/encoders", handleEncoders);
   server.on("/encvalues", handleEncValues);
@@ -917,6 +1373,10 @@ void loop() {
   server.handleClient();
   ArduinoOTA.handle();
   pollPiSerial();
+  pollImu();
+  pollPower();
+  pollStraightDriveControl();
+  pollYawRateControl();
   pollTelemetry();
   pollEncoderDebug();
 }

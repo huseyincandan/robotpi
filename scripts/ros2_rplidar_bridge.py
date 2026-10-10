@@ -32,7 +32,11 @@ class RplidarBridge(Node):
         self.reverse_angle = bool(args.reverse_angle)
         self.angle_offset_deg = float(args.angle_offset_deg)
         self.disable_pwm_start = bool(args.disable_pwm_start)
+        # An even count lets the physical +/-pi ray land exactly on the
+        # opposite bin when the circular scan is recentered below.
         self.bins = max(180, int(args.bins))
+        if self.bins % 2:
+            self.bins += 1
         self.reconnect_seconds = max(0.5, float(args.reconnect_seconds))
 
         self.publisher = self.create_publisher(LaserScan, self.scan_topic, 10)
@@ -121,8 +125,13 @@ class RplidarBridge(Node):
             now - Duration(seconds=scan_time + tf_lag_seconds)
         ).to_msg()
         message.header.frame_id = self.frame_id
-        message.angle_min = 0.0
-        message.angle_max = (2.0 * math.pi) - angle_increment
+        # Publish the same rays in the conventional [-pi, pi) order. The old
+        # [0, 2pi) sweep coincided with a reset map missing the forward rays;
+        # centering the scan lets us test that angular-format hypothesis
+        # without changing any physical ray direction.
+        half_turn = self.bins // 2
+        message.angle_min = -math.pi
+        message.angle_max = math.pi - angle_increment
         message.angle_increment = angle_increment
         message.time_increment = scan_time / float(self.bins)
 
@@ -130,7 +139,7 @@ class RplidarBridge(Node):
 
         message.range_min = self.range_min
         message.range_max = self.range_max
-        message.ranges = ranges
+        message.ranges = ranges[half_turn:] + ranges[:half_turn]
         message.intensities = []
 
         self.publisher.publish(message)

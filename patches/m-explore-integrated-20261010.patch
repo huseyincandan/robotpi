@@ -1,0 +1,477 @@
+diff --git a/explore/include/explore/explore.h b/explore/include/explore/explore.h
+index 8799783..bcf88b7 100644
+--- a/explore/include/explore/explore.h
++++ b/explore/include/explore/explore.h
+@@ -40,6 +40,7 @@
+ 
+ #include <explore/costmap_client.h>
+ #include <explore/frontier_search.h>
++#include <nav2_msgs/msg/costmap.hpp>
+ #include <geometry_msgs/msg/pose_stamped.hpp>
+ #include <tf2_ros/transform_listener.hpp>
+ 
+@@ -54,6 +55,7 @@
+ #include <visualization_msgs/msg/marker_array.hpp>
+ 
+ #include "nav2_msgs/action/navigate_to_pose.hpp"
++#include "nav2_msgs/action/spin.hpp"
+ #include "rclcpp_action/rclcpp_action.hpp"
+ 
+ using namespace std::placeholders;
+@@ -83,6 +85,7 @@ public:
+ 
+   using NavigationGoalHandle =
+       rclcpp_action::ClientGoalHandle<nav2_msgs::action::NavigateToPose>;
++  using SpinGoalHandle = rclcpp_action::ClientGoalHandle<nav2_msgs::action::Spin>;
+ 
+ private:
+   /**
+@@ -118,8 +121,13 @@ private:
+   tf2_ros::TransformListener tf_listener_;
+ 
+   Costmap2DClient costmap_client_;
++  rclcpp::Subscription<nav2_msgs::msg::Costmap>::SharedPtr global_costmap_sub_;
++  nav2_msgs::msg::Costmap::SharedPtr global_costmap_;
++  rclcpp::Time global_costmap_received_at_;
+   rclcpp_action::Client<nav2_msgs::action::NavigateToPose>::SharedPtr
+       move_base_client_;
++  rclcpp_action::Client<nav2_msgs::action::Spin>::SharedPtr spin_client_;
++  SpinGoalHandle::SharedPtr spin_goal_handle_;
+   frontier_exploration::FrontierSearch search_;
+   rclcpp::TimerBase::SharedPtr exploring_timer_;
+   // rclcpp::TimerBase::SharedPtr oneshot_;
+@@ -129,7 +137,10 @@ private:
+ 
+   std::vector<geometry_msgs::msg::Point> frontier_blacklist_;
+   geometry_msgs::msg::Point prev_goal_;
++  geometry_msgs::msg::Point active_frontier_goal_;
+   double prev_distance_;
++  double active_goal_best_distance_{std::numeric_limits<double>::infinity()};
++  rclcpp::Time active_goal_last_progress_;
+   rclcpp::Time last_progress_;
+   size_t last_markers_count_;
+ 
+@@ -138,13 +149,17 @@ private:
+ 
+   // parameters
+   double planner_frequency_;
+-  double potential_scale_, orientation_scale_, gain_scale_;
++  double potential_scale_, orientation_scale_, gain_scale_, min_goal_distance_, frontier_goal_standoff_;
++  int frontier_goal_max_cost_{100};
+   double progress_timeout_;
+   bool visualize_;
+   bool return_to_init_;
+   std::string robot_base_frame_;
+   bool resuming_ = false;
+   bool goal_active_{false};
++  bool canceling_stalled_goal_{false};
++  bool bootstrap_spin_active_{false};
++  unsigned int bootstrap_spin_attempts_{0};
+   rclcpp_action::GoalUUID active_goal_id_;
+ };
+ }  // namespace explore
+diff --git a/explore/src/costmap_client.cpp b/explore/src/costmap_client.cpp
+index ae2da83..c7d33e6 100644
+--- a/explore/src/costmap_client.cpp
++++ b/explore/src/costmap_client.cpp
+@@ -224,7 +224,9 @@ geometry_msgs::msg::Pose Costmap2DClient::getRobotPose() const
+   geometry_msgs::msg::PoseStamped robot_pose;
+   geometry_msgs::msg::Pose empty_pose;
+   robot_pose.header.frame_id = robot_base_frame_;
+-  robot_pose.header.stamp = node_.now();
++  // Use the newest available transform. Requesting wall-clock "now" at
++  // startup can be ahead of the TF buffer and falsely return (0, 0, 0).
++  robot_pose.header.stamp = rclcpp::Time(0);
+ 
+   auto& clk = *node_.get_clock();
+ 
+diff --git a/explore/src/explore.cpp b/explore/src/explore.cpp
+index d72fb18..a66b970 100644
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -70,6 +70,9 @@ Explore::Explore()
+   this->declare_parameter<float>("gain_scale", 1.0);
+   this->declare_parameter<float>("min_frontier_size", 0.5);
+   this->declare_parameter<bool>("return_to_init", false);
++  this->declare_parameter<float>("min_goal_distance", 0.45);
++  this->declare_parameter<float>("frontier_goal_standoff", 0.35);
++  this->declare_parameter<int>("frontier_goal_max_cost", 100);
+ 
+   this->get_parameter("planner_frequency", planner_frequency_);
+   this->get_parameter("progress_timeout", timeout);
+@@ -79,12 +82,25 @@ Explore::Explore()
+   this->get_parameter("gain_scale", gain_scale_);
+   this->get_parameter("min_frontier_size", min_frontier_size);
+   this->get_parameter("return_to_init", return_to_init_);
++  this->get_parameter("min_goal_distance", min_goal_distance_);
++  this->get_parameter("frontier_goal_standoff", frontier_goal_standoff_);
++  this->get_parameter("frontier_goal_max_cost", frontier_goal_max_cost_);
+   this->get_parameter("robot_base_frame", robot_base_frame_);
+ 
++  // Frontier search uses the raw SLAM /map. Goal safety must use Nav2's
++  // separately inflated global costmap, where a free /map cell can cost 237.
++  global_costmap_sub_ = this->create_subscription<nav2_msgs::msg::Costmap>(
++      "/global_costmap/costmap_raw", rclcpp::QoS(1).reliable(),
++      [this](nav2_msgs::msg::Costmap::SharedPtr msg) {
++        global_costmap_ = msg;
++        global_costmap_received_at_ = this->now();
++      });
++
+   progress_timeout_ = timeout;
+   move_base_client_ =
+       rclcpp_action::create_client<nav2_msgs::action::NavigateToPose>(
+           this, ACTION_NAME);
++  spin_client_ = rclcpp_action::create_client<nav2_msgs::action::Spin>(this, "spin");
+ 
+   search_ = frontier_exploration::FrontierSearch(costmap_client_.getCostmap(),
+                                                  potential_scale_, gain_scale_,
+@@ -228,8 +244,66 @@ void Explore::visualizeFrontiers(
+ 
+ void Explore::makePlan()
+ {
++  // A collision-checked scan turn owns motion until its action finishes.
++  if (bootstrap_spin_active_) return;
++  // A live NavigateToPose goal owns the route until it succeeds, fails, or is
++  // cancelled.  Re-ranking frontiers on every planner timer tick can select a
++  // different centroid and async_send_goal() then preempts Nav2's in-flight
++  // FollowPath action.  That produced the observed 10-second route changes.
++  // Local obstacle avoidance and Nav2 recovery continue independently while
++  // this guard is active.
++  if (goal_active_) {
++    if (canceling_stalled_goal_ || !navigation_goal_handle_) {
++      return;
++    }
++
++    // Monitor the active target while Nav2 owns it. The old timeout check was
++    // below frontier selection, so it could never run while goal_active_ was
++    // true (this early return prevented reaching it). A stalled route should
++    // be abandoned so exploration can try a different frontier, while normal
++    // local obstacle avoidance and Nav2 recovery continue during this window.
++    const auto pose = costmap_client_.getRobotPose();
++    const double distance = std::hypot(
++        active_frontier_goal_.x - pose.position.x,
++        active_frontier_goal_.y - pose.position.y);
++    if (distance + 0.10 < active_goal_best_distance_) {
++      active_goal_best_distance_ = distance;
++      active_goal_last_progress_ = this->now();
++    }
++
++    if (!resuming_ &&
++        (this->now() - active_goal_last_progress_ >
++         tf2::durationFromSec(progress_timeout_))) {
++      frontier_blacklist_.push_back(active_frontier_goal_);
++      canceling_stalled_goal_ = true;
++      RCLCPP_WARN(logger_,
++                  "No meaningful progress toward active frontier for %.1f s; "
++                  "canceling goal and selecting another frontier",
++                  progress_timeout_);
++      move_base_client_->async_cancel_goal(navigation_goal_handle_);
++      return;
++    }
++
++    RCLCPP_DEBUG(logger_, "Navigation goal active; deferring frontier reselection");
++    return;
++  }
++
++  if (!global_costmap_ ||
++      (this->now() - global_costmap_received_at_).seconds() > 3.0) {
++    RCLCPP_WARN_THROTTLE(logger_, *this->get_clock(), 5000,
++                         "Waiting for fresh Nav2 global costmap before selecting a frontier");
++    return;
++  }
++
+   // find frontiers
+   auto pose = costmap_client_.getRobotPose();
++  unsigned int robotMx, robotMy;
++  if (!costmap_client_.getCostmap()->worldToMap(
++          pose.position.x, pose.position.y, robotMx, robotMy)) {
++    RCLCPP_WARN_THROTTLE(logger_, *this->get_clock(), 5000,
++                         "Robot pose outside current SLAM map; retrying after TF/map update");
++    return;
++  }
+   // get frontiers sorted according to cost
+   auto frontiers = search_.searchFrom(pose.position);
+   RCLCPP_DEBUG(logger_, "found %lu frontiers", frontiers.size());
+@@ -251,21 +325,162 @@ void Explore::makePlan()
+     visualizeFrontiers(frontiers);
+   }
+ 
+-  // find non blacklisted frontier
+-  auto frontier =
+-      std::find_if_not(frontiers.begin(), frontiers.end(),
+-                       [this](const frontier_exploration::Frontier& f) {
+-                         return goalOnBlacklist(f.centroid);
+-                       });
++  // Search every ranked frontier. Restricting the search to the single
++  // lowest-cost frontier meant a rear-facing winner could suppress valid
++  // forward/side-front targets on every other frontier.
++  // A frontier centroid is on the unknown side of a free/unknown boundary.
++  // Sending that point directly gives Nav2 a goal in an inflated edge cell.
++  // It also permits tiny, sub-breakaway goals (observed at 0.15 m), which
++  // make this differential-drive robot rotate in place instead of exploring.
++  // At startup a single frontier can surround the robot, making both its
++  // centroid and nearest cell misleadingly close. Select a sufficiently far,
++  // forward-facing boundary point, then stop short on its known-free side.
++  auto frontier = frontiers.end();
++
++  const double minimum_boundary_distance =
++      min_goal_distance_ + frontier_goal_standoff_;
++  const double desired_boundary_distance = minimum_boundary_distance + 0.35;
++  const auto& q = pose.orientation;
++  const double heading = std::atan2(
++      2.0 * (q.w * q.z + q.x * q.y),
++      1.0 - 2.0 * (q.y * q.y + q.z * q.z));
++  const double forward_x = std::cos(heading);
++  const double forward_y = std::sin(heading);
++  geometry_msgs::msg::Point boundary_position;
++  double distance_to_boundary = 0.0;
++  bool selectedForwardFrontier = false;
++  size_t rejectedDistance = 0, rejectedDirection = 0;
++  size_t rejectedCostmap = 0, rejectedBounds = 0, rejectedCost = 0;
++  // Prefer a forward cone while one is available. Once it is exhausted,
++  // allow a collision-checked Nav2 reorientation for the remaining map.
++  for (int pass = 0; pass < 2 && frontier == frontiers.end(); ++pass) {
++    const double minimumForwardness = (pass == 0) ? 0.25 : -1.0;
++    for (auto candidate = frontiers.begin(); candidate != frontiers.end(); ++candidate) {
++      if (goalOnBlacklist(candidate->centroid)) continue;
++
++      double bestScore = std::numeric_limits<double>::infinity();
++      geometry_msgs::msg::Point candidateBoundary;
++      double candidateDistance = 0.0;
++      for (const auto& point : candidate->points) {
++        const double pointDx = point.x - pose.position.x;
++        const double pointDy = point.y - pose.position.y;
++        const double distance = std::hypot(pointDx, pointDy);
++        if (distance < minimum_boundary_distance) { ++rejectedDistance; continue; }
++        const double forwardness = (pointDx * forward_x + pointDy * forward_y) / distance;
++        if (forwardness < minimumForwardness) { ++rejectedDirection; continue; }
++
++        // A radial standoff from a frontier cell does not guarantee clearance
++        // from the nearest wall (the wall may be off-axis). Check the actual
++        // Nav2 global costmap cell for the resulting free-side target and
++        // reject goals inside inflated/high-cost obstacle areas.
++        geometry_msgs::msg::Point candidateTarget = point;
++        candidateTarget.x -= frontier_goal_standoff_ * pointDx / distance;
++        candidateTarget.y -= frontier_goal_standoff_ * pointDy / distance;
++        const auto& meta = global_costmap_->metadata;
++        if (global_costmap_->header.frame_id != costmap_client_.getGlobalFrameID() ||
++            meta.resolution <= 0.0 || meta.size_x == 0 || meta.size_y == 0 ||
++            global_costmap_->data.size() !=
++                static_cast<size_t>(meta.size_x) * meta.size_y) {
++          ++rejectedCostmap;
++          continue;
++        }
++        const auto& origin = meta.origin;
++        const double yaw = std::atan2(
++            2.0 * (origin.orientation.w * origin.orientation.z +
++                   origin.orientation.x * origin.orientation.y),
++            1.0 - 2.0 * (origin.orientation.y * origin.orientation.y +
++                         origin.orientation.z * origin.orientation.z));
++        const double offsetX = candidateTarget.x - origin.position.x;
++        const double offsetY = candidateTarget.y - origin.position.y;
++        const double mapX = (std::cos(yaw) * offsetX + std::sin(yaw) * offsetY) /
++                            meta.resolution;
++        const double mapY = (-std::sin(yaw) * offsetX + std::cos(yaw) * offsetY) /
++                            meta.resolution;
++        if (mapX < 0.0 || mapY < 0.0 ||
++            mapX >= meta.size_x || mapY >= meta.size_y) {
++          ++rejectedBounds;
++          continue;
++        }
++        const auto index = static_cast<size_t>(mapY) * meta.size_x +
++                           static_cast<size_t>(mapX);
++        if (global_costmap_->data[index] > frontier_goal_max_cost_) {
++          ++rejectedCost;
++          continue;
++        }
++
++        const double score = std::abs(distance - desired_boundary_distance) - 0.30 * forwardness;
++        if (score < bestScore) {
++          bestScore = score;
++          candidateBoundary = point;
++          candidateDistance = distance;
++        }
++      }
++      if (std::isfinite(bestScore)) {
++        frontier = candidate;
++        boundary_position = candidateBoundary;
++        distance_to_boundary = candidateDistance;
++        selectedForwardFrontier = (pass == 0);
++        break;
++      }
++    }
++  }
+   if (frontier == frontiers.end()) {
+-    RCLCPP_WARN(logger_, "All frontiers traversed/tried out, stopping.");
+-    auto status_msg = explore_lite_msgs::msg::ExploreStatus();
+-    status_msg.status = explore_lite_msgs::msg::ExploreStatus::EXPLORATION_COMPLETE;
+-    status_pub_->publish(status_msg);
+-    stop(true);
++    RCLCPP_WARN_THROTTLE(logger_, *this->get_clock(), 5000,
++                         "Frontier rejects: distance=%zu direction=%zu costmap=%zu bounds=%zu cost=%zu, min_boundary=%.2f",
++                         rejectedDistance, rejectedDirection, rejectedCostmap, rejectedBounds, rejectedCost,
++                         minimum_boundary_distance);
++    // A fresh map can contain only a nearby free/unknown boundary. Driving
++    // toward it would violate the normal standoff, but a bounded Nav2 Spin
++    // can collect new laser viewpoints without commanding translation.
++    if (rejectedDistance > 0 && rejectedDirection == 0 &&
++        rejectedCostmap == 0 && rejectedBounds == 0 && rejectedCost == 0 &&
++        bootstrap_spin_attempts_ < 4 && spin_client_->action_server_is_ready()) {
++      ++bootstrap_spin_attempts_;
++      bootstrap_spin_active_ = true;
++      nav2_msgs::action::Spin::Goal scan_goal;
++      scan_goal.target_yaw = static_cast<float>(M_PI / 4.0);
++      scan_goal.time_allowance.sec = 8;
++      auto options = rclcpp_action::Client<nav2_msgs::action::Spin>::SendGoalOptions();
++      options.goal_response_callback = [this](const SpinGoalHandle::SharedPtr& handle) {
++        if (!handle) {
++          bootstrap_spin_active_ = false;
++          bootstrap_spin_attempts_ = 4;
++          RCLCPP_WARN(logger_, "Bootstrap scan turn rejected by Nav2");
++        } else {
++          spin_goal_handle_ = handle;
++        }
++      };
++      options.result_callback = [this](const SpinGoalHandle::WrappedResult& result) {
++        spin_goal_handle_.reset();
++        bootstrap_spin_active_ = false;
++        if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
++          bootstrap_spin_attempts_ = 4;
++          RCLCPP_WARN(logger_, "Bootstrap scan turn failed; no further automatic turns");
++        } else {
++          RCLCPP_INFO(logger_, "Bootstrap scan turn complete; evaluating the new map");
++        }
++      };
++      RCLCPP_INFO(logger_, "Nearby-only frontier; requesting collision-checked 45-degree scan turn (%u/4)",
++                  bootstrap_spin_attempts_);
++      spin_client_->async_send_goal(scan_goal, options);
++      return;
++    }
++    RCLCPP_DEBUG(logger_,
++                 "No frontier target below cost %d yet; waiting for map update.",
++                 frontier_goal_max_cost_);
+     return;
+   }
+-  geometry_msgs::msg::Point target_position = frontier->centroid;
++
++  geometry_msgs::msg::Point target_position = boundary_position;
++  const double dx = target_position.x - pose.position.x;
++  const double dy = target_position.y - pose.position.y;
++  target_position.x -= frontier_goal_standoff_ * dx / distance_to_boundary;
++  target_position.y -= frontier_goal_standoff_ * dy / distance_to_boundary;
++
++  RCLCPP_DEBUG(logger_,
++               "Selected safe frontier: boundary=%.2f m, target=%.2f m, standoff=%.2f m, mode=%s",
++               distance_to_boundary, distance_to_boundary - frontier_goal_standoff_,
++               frontier_goal_standoff_, selectedForwardFrontier ? "forward" : "reorient");
+ 
+   // time out if we are not making any progress
+   bool same_goal = same_point(prev_goal_, target_position);
+@@ -302,11 +517,23 @@ void Explore::makePlan()
+   // send goal to move_base if we have something new to pursue
+   auto goal = nav2_msgs::action::NavigateToPose::Goal();
+   goal.pose.pose.position = target_position;
+-  goal.pose.pose.orientation.w = 1.;
++  // Frontier points have no intrinsic final yaw.  Preserve the useful travel
++  // heading instead of imposing map yaw 0, which previously triggered a
++  // large in-place spin after every short goal.
++  const double target_yaw = std::atan2(dy, dx);
++  goal.pose.pose.orientation.z = std::sin(target_yaw / 2.0);
++  goal.pose.pose.orientation.w = std::cos(target_yaw / 2.0);
+   goal.pose.header.frame_id = costmap_client_.getGlobalFrameID();
+   goal.pose.header.stamp = this->now();
+ 
+   goal_active_ = true;
++  bootstrap_spin_attempts_ = 0;
++  canceling_stalled_goal_ = false;
++  active_frontier_goal_ = frontier->centroid;
++  active_goal_best_distance_ = std::hypot(
++      active_frontier_goal_.x - pose.position.x,
++      active_frontier_goal_.y - pose.position.y);
++  active_goal_last_progress_ = this->now();
+   auto send_goal_options = rclcpp_action::Client<
+       nav2_msgs::action::NavigateToPose>::SendGoalOptions();
+ 
+@@ -315,7 +542,9 @@ void Explore::makePlan()
+         if (!goal_handle) {
+           RCLCPP_ERROR(logger_, "Goal was REJECTED by the action server");
+           goal_active_ = false;
++          canceling_stalled_goal_ = false;
+         } else {
++          navigation_goal_handle_ = goal_handle;
+           active_goal_id_ = goal_handle->get_goal_id();
+           RCLCPP_DEBUG(logger_, "Goal ACCEPTED, uuid: %s",
+             rclcpp_action::to_string(active_goal_id_).c_str());
+@@ -324,8 +553,8 @@ void Explore::makePlan()
+ 
+   send_goal_options.result_callback =
+       [this,
+-       target_position](const NavigationGoalHandle::WrappedResult& result) {
+-        reachedGoal(result, target_position);
++       frontier_goal = frontier->centroid](const NavigationGoalHandle::WrappedResult& result) {
++        reachedGoal(result, frontier_goal);
+       };
+   move_base_client_->async_send_goal(goal, send_goal_options);
+ }
+@@ -384,6 +613,9 @@ void Explore::reachedGoal(const NavigationGoalHandle::WrappedResult& result,
+   switch (result.code) {
+     case rclcpp_action::ResultCode::SUCCEEDED:
+       RCLCPP_DEBUG(logger_, "Goal was successful");
++      // A completed frontier can remain in an unchanged occupancy grid for a
++      // few scans. Mark it complete so it is not selected again immediately.
++      frontier_blacklist_.push_back(frontier_goal);
+       last_progress_ = this->now();
+       prev_distance_ = 0;
+       break;
+@@ -407,23 +639,22 @@ void Explore::reachedGoal(const NavigationGoalHandle::WrappedResult& result,
+       return;
+     case rclcpp_action::ResultCode::CANCELED:
+       RCLCPP_DEBUG(logger_, "Goal was canceled");
+-      // If goal canceled might be because exploration stopped from topic. Don't make new plan.
++      if (canceling_stalled_goal_) {
++        canceling_stalled_goal_ = false;
++        navigation_goal_handle_.reset();
++        prev_goal_ = geometry_msgs::msg::Point();
++        prev_distance_ = 0.0;
++        RCLCPP_INFO(logger_, "Stalled frontier released; planner will select another goal");
++        return;
++      }
++      // A manually canceled goal should not restart exploration.
+       return;
+     default:
+       RCLCPP_WARN(logger_, "Unknown result code from move base nav2");
+       break;
+   }
+-  // find new goal immediately regardless of planning frequency.
+-  // execute via timer to prevent dead lock in move_base_client (this is
+-  // callback for sendGoal, which is called in makePlan). the timer must live
+-  // until callback is executed.
+-  // oneshot_ = relative_nh_.createTimer(
+-  //     ros::Duration(0, 0), [this](const ros::TimerEvent&) { makePlan(); },
+-  //     true);
+-
+-  // Because of the 1-thread-executor nature of ros2 I think timer is not
+-  // needed.
+-  makePlan();
++  // Let the planner timer select the next frontier after fresh map data
++  // arrives. Calling makePlan() here bypasses planner_frequency.
+ }
+ 
+ void Explore::start()
+@@ -439,6 +670,8 @@ void Explore::stop(bool finished_exploring)
+   RCLCPP_INFO(logger_, "Exploration stopped.");
+ 
+   goal_active_ = false;
++  canceling_stalled_goal_ = false;
++  navigation_goal_handle_.reset();
+   // Only publish paused status if manually stopped (not finished exploring)
+   if (!finished_exploring) {
+     auto status_msg = explore_lite_msgs::msg::ExploreStatus();
+@@ -447,6 +680,7 @@ void Explore::stop(bool finished_exploring)
+   }
+ 
+   move_base_client_->async_cancel_all_goals();
++  spin_client_->async_cancel_all_goals();
+   exploring_timer_->cancel();
+ 
+   if (return_to_init_ && finished_exploring) {

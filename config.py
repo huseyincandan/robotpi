@@ -1,14 +1,7 @@
 # Motor kontrolu artik Pi GPIO'sundan degil, donanim UART ile bagli ESP32-S3 (MotorEspS3.ino) uzerinden yapiliyor.
-# 2026-09-07: joystick (manuel) ve nav2 donuslerinin ikisi de ayri ayri
-# ayarlaniyordu - canli testte manuel x=40 (~%40) 0.6s'de ~150 derece donmesi
-# asiri agresif bulundu. Tek bir paylasilan tavan ile ikisi de ayni
-# yumusaklikta tutuluyor (bkz. MOTOR.MAX_TURN_PERCENT ve
-# MAP.ROS2_NAV2_MAX_TURN_PERCENT).
-# Ilk denemede 30.0 verildi, ama canli testte (farkli sure ile karsilastirilmis
-# olsa da) beklenenden cok daha yavas donduk - dusuk yuzdede patinaj/tutunamama
-# riski de var. 36.0'a yukseltildi, ayni sure (0.6s) ile adil karsilastirma
-# yapilarak dogrulandi.
-SHARED_MAX_TURN_PERCENT = 36.0
+# Manual and Nav2 turn commands may use the full normalized range. The physical
+# PWM limit (0..255) remains enforced by the S3 motor driver.
+SHARED_MAX_TURN_PERCENT = 100.0
 
 MOTOR_SERIAL = {
     "PORT": "/dev/ttyAMA0",
@@ -40,6 +33,12 @@ ULTRASONIC = {
     # only a last-resort failsafe for the true blind gap below the lidar's
     # minimum range, so it can be tighter than the manual/joystick threshold.
     "AUTONOMOUS_STOP_DISTANCE_CM": 12,
+    # Temporarily disabled for autonomous navigation diagnosis: the safety
+    # cluster has repeatedly produced 11.8-11.9 cm echoes while the reported
+    # stable distance was ~96 cm, stopping Nav2 forward commands even with its
+    # Range layer disabled. Manual/joystick ultrasonic protection remains on;
+    # autonomous obstacle handling uses the LIDAR costmap and LIDAR stop gate.
+    "AUTONOMOUS_FORWARD_STOP_ENABLED": False,
     "MIN_FORWARD_SPEED_PERCENT": 12,
     "SAFETY_CHECK_INTERVAL_SECONDS": 0.05,
     "FILTER_WINDOW_SIZE": 7,
@@ -50,13 +49,7 @@ ULTRASONIC = {
 }
 
 MOTOR = {
-    # Live 2026-09-20 breakaway test: 12% commanded PWM held the chassis
-    # still; 18% started a real forward roll.  This is deliberately separate
-    # from manual/ultrasonic minimum speed because it calibrates Nav2's
-    # cmd_vel-to-motor path.
-    "NAV2_MIN_FORWARD_PERCENT": 18.0,
-    # Manuel/joystick donusler icin ust sinir - nav2 ile ortak, bkz. yukaridaki
-    # SHARED_MAX_TURN_PERCENT notu.
+    # Keep the API bound explicit while allowing the full normalized range.
     "MAX_TURN_PERCENT": SHARED_MAX_TURN_PERCENT
 }
 
@@ -75,6 +68,10 @@ LIDAR = {
     "MIN_VALID_CM": 12,
     "MAX_VALID_CM": 550,
     "FRONT_STOP_CM": 40,
+    # Autonomous Nav2 already uses the raw-scan collision monitor. Its
+    # independent hard gate is only a last-resort bumper margin: the laser is
+    # 0.07 m ahead of the rear axle and the front bumper about 0.27 m ahead.
+    "AUTONOMOUS_FRONT_STOP_CM": 30,
     "FRONT_OPEN_CM": 70,
     "CENTERING_GAIN": 0.22,
     "CENTERING_DEADBAND_CM": 12,
@@ -218,8 +215,13 @@ MAP = {
     "ROS2_LIDAR_PORT": "/dev/serial/by-id/usb-Silicon_Labs_CP2102N_USB_to_UART_Bridge_Controller_da358bbe261ef111960cc3e40f0f12f8-if00-port0",
     "ROS2_LIDAR_BAUDRATE": 460800,
     "ROS2_LIDAR_FRAME_ID": "laser",
-    # LIDAR is mounted 8.5 cm behind the robot's geometric center.
-    "ROS2_LIDAR_X_OFFSET_M": -0.085,
+    # base_link/odom rotates about the rear drive axle, not the body center.
+    # Sequential scan matching during a 148 deg in-place turn (2026-10-10)
+    # estimated the laser at x=+0.069 m relative to that rotation center.
+    # The former -0.085 m value used the body center as its reference and
+    # made SLAM add a large false map->odom correction during turns.
+    "ROS2_LIDAR_X_OFFSET_M": 0.07,
+    "ROS2_ULTRASONIC_X_OFFSET_M": 0.27,
     "ROS2_LIDAR_DRIVER": "python_bridge",
     "ROS2_LIDAR_REVERSE_ANGLE": True,
     # TEK lidar montaj-acisi offset'i (obstacle-avoidance proxy'sindeki eski
@@ -295,24 +297,25 @@ MAP = {
     # config oldugu icin bundan etkilenmez, sadece nav2/explore'un normal
     # surusu ~%25 yavaslatildi.
     "ROS2_NAV2_MAX_LINEAR_X": 0.144,
-    "ROS2_NAV2_MAX_ANGULAR_Z": 0.34,
+    "ROS2_NAV2_MAX_ANGULAR_Z": 0.45,
+    # Enable only after S3 TURNRATE ground-speed validation.
+    "ROS2_S3_YAW_RATE_CONTROL": False,
     "ROS2_NAV2_MAX_DRIVE_PERCENT": 22.8,
-    # 2026-09-19: was SHARED_MAX_TURN_PERCENT (36.0, shared with manual
-    # joystick driving) - live gyro tests this session showed 36% turn
-    # commands produce 90-100 deg/s real rotation, smearing ~15-20 deg of
-    # real heading into a single ~150-200ms lidar sweep (slam_toolbox does
-    # NOT deskew scans - confirmed no time_increment/motion-compensation
-    # logic in this slam_toolbox build's laser_utils.hpp), which is what
-    # triggers most MAP JUMP events during actual autonomous driving/turning
-    # (live-reproduced: 2 gross jumps in ~20s, both while nav2 was driving at
-    # x=36.0). Split nav2's own cap out from the shared joystick constant so
-    # manual driving keeps its full responsiveness. Chose 10.0 from a live
-    # sweep at 4/6/8/10%: real speed stayed in a ~20-70 deg/s band (vs 90-100
-    # at 36%), roughly halving worst-case per-scan smear.
-    "ROS2_NAV2_MAX_TURN_PERCENT": 10.0,
+    # Allow Nav2's angular request to map across the full motor range.
+    "ROS2_NAV2_MAX_TURN_PERCENT": 100.0,
     "ROS2_NAV2_ANGULAR_SLEW_RATE": 0.45,
     "ROS2_NAV2_MIN_LINEAR_SCALE_AT_MAX_TURN": 0.25,
+    # Experimental closed-loop pulse drive: each wheel receives only this
+    # fixed PWM amplitude; encoder position error controls pulse duration.
+    "ROS2_NAV2_FIXED_PWM": 150,
+    "ROS2_NAV2_FIXED_PWM_STOP_LATENCY_SECONDS": 0.04,
     "ROS2_CMDVEL_ODOM_RATE_HZ": 50.0,
+    # S3 emits encoder-bearing TELEM at 50 Hz. Match the bridge output and
+    # encoder feedback rates so fixed-PWM pulses can be stopped promptly.
+    "ROS2_CMDVEL_DRIVE_RATE_HZ": 50.0,
+    # S3 emits encoder-bearing TELEM at 50 Hz. Poll at that source rate;
+    # sequence checks in the bridge still protect against cached repeats.
+    "ROS2_CMDVEL_ENCODER_SAMPLE_RATE_HZ": 50.0,
     # Real MPU6050 gyro_z (via GET /imu/motion, polled independently by
     # scripts/ros2_imu_bridge.py) is fused into yaw by robot_localization's
     # EKF (config/ekf.yaml) instead of hand-rolled integration here. Flip
@@ -340,9 +343,15 @@ MAP = {
     # was still wrong for the raw /odom_raw debug output and any future
     # encoder-only fallback path, so corrected here.
     "ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED": True,
-    "ROS2_ENCODER_TICKS_PER_METER": 21786.0,
-    "ROS2_ENCODER_TRACK_WIDTH_M": 0.102,
+    # 2026-10-06 new-wheel calibration: ticks/m from opposing ~0.33 m legs;
+    # track width from opposing 90-degree pivots (IMU and lidar agree within
+    # 1 degree). See logs/motion-calibration-2026-10-06/204225.json and 204713.json.
+    "ROS2_ENCODER_TICKS_PER_METER": 13352.0,
+    "ROS2_ENCODER_TRACK_WIDTH_M": 0.1443,
     "ROS2_ENCODER_MAX_AGE_SECONDS": 0.5,
+    # Reject a counter discontinuity (for example an S3 reset) instead of
+    # turning it into a physically impossible odometry velocity.
+    "ROS2_ENCODER_MAX_TICK_RATE": 15000.0,
     # Watchdog for slam_toolbox scan-matching failures: a real robot can't
     # move faster than ROS2_NAV2_MAX_LINEAR_X, so a much larger implied
     # speed between two pose samples means the map->odom TF jumped (a
@@ -353,6 +362,11 @@ MAP = {
     "MAP_JUMP_MAX_YAW_RATE_RAD_S": 2.0,
     "MAP_JUMP_MIN_YAW_DEG": 30.0,
     "MAP_JUMP_CHECK_INTERVAL_SECONDS": 0.5,
+    # Pose exporter is ~1 Hz; collect the S3 gyro more frequently so yaw is
+    # integrated across the whole pose interval instead of inferred from only
+    # its two endpoint speeds.
+    "MAP_IMU_YAW_SAMPLE_INTERVAL_SECONDS": 0.05,
+    "MAP_IMU_YAW_HISTORY_SECONDS": 8.0,
     "MAP_IMU_YAW_WATCHDOG_ENABLED": True,
     "MAP_IMU_YAW_MAX_ERROR_DEG": 40.0,
     # 2026-09-18: koridorda (hicbir engel yokken) surekli donup durma
@@ -381,9 +395,10 @@ MAP = {
     # kendisi bu esigin uzerindeyken hatayi biriktirme, sadece donus
     # yavaslayip/durduktan sonraki gercek uyusmazligi say.
     "MAP_IMU_YAW_FAST_TURN_DPS": 25.0,
-    # A detected jump stops the robot. Full SLAM reset/restart is opt-in: it
-    # is a diagnostic recovery tool, not normal navigation behaviour.
-    "MAP_JUMP_AUTO_RECOVERY_ENABLED": False,
+    # Confirmed SLAM/IMU pose jumps stop motion and clear the corrupted live
+    # map automatically. The watchdog leaves Explore stopped after recovery;
+    # it never resumes motion on its own.
+    "MAP_JUMP_AUTO_RECOVERY_ENABLED": True,
     # 2026-09-05: guc/I2C glitch (bkz. repo notlari) sirasinda lidar'in
     # USB-seri baglantisi donup /scan yayinini tamamen durdurabiliyor, ve
     # kendi kendine toparlanmiyor (glitch bitmesine ragmen dakikalarca
@@ -405,7 +420,8 @@ MAP = {
 LOGGING = {
     "DIR": "logs",
     "KEEP_RUNS": 1,
-    "RESET_ON_START": True,
+    # Keep rosbag captures and prior run evidence when the app restarts.
+    "RESET_ON_START": False,
     "APP_LOG_FILE": "app.log"
 }
 

@@ -1,0 +1,84 @@
+--- a/explore/src/explore.cpp
++++ b/explore/src/explore.cpp
+@@ -289,39 +289,42 @@
+   const double forward_y = std::sin(heading);
+   geometry_msgs::msg::Point boundary_position;
+   double distance_to_boundary = 0.0;
+-  for (auto candidate = frontiers.begin(); candidate != frontiers.end(); ++candidate) {
+-    if (goalOnBlacklist(candidate->centroid)) continue;
++  bool selectedForwardFrontier = false;
++  // Prefer a forward cone while one is available. Once it is exhausted,
++  // allow a collision-checked Nav2 reorientation for the remaining map.
++  for (int pass = 0; pass < 2 && frontier == frontiers.end(); ++pass) {
++    const double minimumForwardness = (pass == 0) ? 0.25 : -1.0;
++    for (auto candidate = frontiers.begin(); candidate != frontiers.end(); ++candidate) {
++      if (goalOnBlacklist(candidate->centroid)) continue;
+ 
+-    double best_score = std::numeric_limits<double>::infinity();
+-    geometry_msgs::msg::Point candidate_boundary;
+-    double candidate_distance = 0.0;
+-    for (const auto& point : candidate->points) {
+-      const double point_dx = point.x - pose.position.x;
+-      const double point_dy = point.y - pose.position.y;
+-      const double distance = std::hypot(point_dx, point_dy);
+-      if (distance < minimum_boundary_distance) continue;
+-      const double forwardness = (point_dx * forward_x + point_dy * forward_y) / distance;
+-      // This differential-drive configuration deliberately has no reverse
+-      // trajectory. A rear or near-sideways frontier would make Nav2 drive
+-      // forward while its goal remains behind it, so only consider a ±75°
+-      // forward cone.
+-      if (forwardness < 0.25) continue;
+-      const double score = std::abs(distance - desired_boundary_distance) - 0.30 * forwardness;
+-      if (score < best_score) {
+-        best_score = score;
+-        candidate_boundary = point;
+-        candidate_distance = distance;
++      double bestScore = std::numeric_limits<double>::infinity();
++      geometry_msgs::msg::Point candidateBoundary;
++      double candidateDistance = 0.0;
++      for (const auto& point : candidate->points) {
++        const double pointDx = point.x - pose.position.x;
++        const double pointDy = point.y - pose.position.y;
++        const double distance = std::hypot(pointDx, pointDy);
++        if (distance < minimum_boundary_distance) continue;
++        const double forwardness = (pointDx * forward_x + pointDy * forward_y) / distance;
++        if (forwardness < minimumForwardness) continue;
++        const double score = std::abs(distance - desired_boundary_distance) - 0.30 * forwardness;
++        if (score < bestScore) {
++          bestScore = score;
++          candidateBoundary = point;
++          candidateDistance = distance;
++        }
++      }
++      if (std::isfinite(bestScore)) {
++        frontier = candidate;
++        boundary_position = candidateBoundary;
++        distance_to_boundary = candidateDistance;
++        selectedForwardFrontier = (pass == 0);
++        break;
+       }
+     }
+-    if (std::isfinite(best_score)) {
+-      frontier = candidate;
+-      boundary_position = candidate_boundary;
+-      distance_to_boundary = candidate_distance;
+-      break;
+-    }
+   }
+   if (frontier == frontiers.end()) {
+-    RCLCPP_DEBUG(logger_, "No safe forward frontier point yet; waiting for map update.");
++    RCLCPP_DEBUG(logger_, "No safe frontier point yet; waiting for map update.");
+     return;
+   }
+ 
+@@ -332,9 +335,9 @@
+   target_position.y -= frontier_goal_standoff_ * dy / distance_to_boundary;
+ 
+   RCLCPP_DEBUG(logger_,
+-               "Selected safe frontier: boundary=%.2f m, target=%.2f m, standoff=%.2f m",
++               "Selected safe frontier: boundary=%.2f m, target=%.2f m, standoff=%.2f m, mode=%s",
+                distance_to_boundary, distance_to_boundary - frontier_goal_standoff_,
+-               frontier_goal_standoff_);
++               frontier_goal_standoff_, selectedForwardFrontier ? "forward" : "reorient");
+ 
+   // time out if we are not making any progress

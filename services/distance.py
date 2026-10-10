@@ -1,5 +1,6 @@
 import asyncio
 from collections import deque
+import math
 import os
 import statistics
 import threading
@@ -19,6 +20,20 @@ Device.pin_factory = LGPIOFactory()
 from gpiozero import DistanceSensor
 
 from config import ULTRASONIC
+
+
+def valid_distance_cm(value, max_distance_m, min_distance_cm=2.0):
+
+    try:
+        centimeters = float(value)
+        maximum_cm = float(max_distance_m) * 100.0
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+    return (
+        math.isfinite(centimeters)
+        and min_distance_cm <= centimeters <= maximum_cm
+    )
 
 
 def nearest_confirmed_cluster(samples, minimum_samples, maximum_spread):
@@ -60,14 +75,29 @@ class DistanceService:
 
     def read_centimeters(self):
 
-        centimeters = self.sensor.distance * 100
+        try:
+            centimeters = float(self.sensor.distance) * 100.0
+        except Exception:
+            centimeters = float("nan")
+
         with self._samples_lock:
-            self._samples.append(float(centimeters))
+            if not valid_distance_cm(
+                centimeters,
+                ULTRASONIC["MAX_DISTANCE_METERS"]
+            ):
+                # Never let a no-echo/invalid pulse become an obstacle distance
+                # or remain hidden behind an older, apparently stable cluster.
+                self._samples.clear()
+                return None
+
+            self._samples.append(centimeters)
         return centimeters
 
     def read_safety_centimeters(self):
 
-        self.read_centimeters()
+        centimeters = self.read_centimeters()
+        if centimeters is None:
+            return None
 
         with self._samples_lock:
             samples = list(self._samples)
@@ -85,9 +115,22 @@ class DistanceService:
 
     def read_observation(self):
 
-        self.read_centimeters()
+        centimeters = self.read_centimeters()
         with self._samples_lock:
             samples = list(self._samples)
+
+        if not samples:
+            return {
+                "distance_cm": None,
+                "stable": False,
+                "confidence": 0.0,
+                "sample_count": 0,
+                "spread_cm": None,
+                "nearest_cluster_confirmed": False,
+                "nearest_cluster_distance_cm": None,
+                "nearest_cluster_sample_count": 0,
+                "nearest_cluster_spread_cm": None
+            }
 
         distance_cm = float(statistics.median(samples))
         spread_cm = float(max(samples) - min(samples))
@@ -130,8 +173,7 @@ async def log_distance_loop(distance):
             )
             print(
                 "DISTANCE:",
-                round(centimeters, 1),
-                "cm",
+                "unknown" if centimeters is None else f"{centimeters:.1f} cm",
                 flush=True
             )
 

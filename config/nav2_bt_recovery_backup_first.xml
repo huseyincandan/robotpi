@@ -1,25 +1,16 @@
 <!--
   Based on nav2_bt_navigator's stock navigate_to_pose_w_replanning_and_recovery.xml,
-  with two changes vs stock:
-  1) RoundRobin recovery order is BackUp -> Spin -> Wait instead of Spin -> Wait
-     -> BackUp: a pure in-place Spin doesn't create any clearance when wedged
-     against an obstacle, while BackUp actually creates room to move (matches
-     services/motor.py's own hardware-validated recovery order). Not chassis-
-     specific - kept as-is after the 2026-09-05 rebuild to 2-wheel diff-drive
-     + front caster.
-  2) The stock ReactiveFallback wraps RecoveryActions behind a GoalUpdated check,
-     which returns SUCCESS (skipping RecoveryActions entirely) the instant the
-     blackboard goal changes. explore_lite sends a new goal within the same tick
-     a FollowPath/ComputePathToPose failure is reported, so GoalUpdated fired
-     first every single time and RecoveryActions (ClearingActions/BackUp/Spin/
-     Wait) never ran at all - confirmed live: 0 "Running backup"/"Running spin"
-     log lines despite repeated "Failed to make progress"/"No valid trajectories"
-     errors. The robot just kept re-planning toward whatever new frontier goal
-     explore_lite picked next, from the same wedged pose, so it never physically
-     moved and DWB burned cycles hunting for a valid trajectory near obstacles
-     (visible as excessive in-place-style turning). RecoveryActions now runs
-     directly (GoalUpdated removed) so a stuck robot always gets one real
-     clearing/backup/spin/wait attempt before a new goal is allowed to take over.
+  with these behavior changes:
+  1) A failed FollowPath tries a collision-checked in-place Spin before retrying.
+     Automatic BackUp made the robot visibly reverse and then retry the same
+     obstructed frontier. If the spin and retry still fail, the failed goal is
+     returned to explore_lite so it can blacklist it and select another.
+  2) The stock ReactiveFallback can let GoalUpdated skip recovery as soon as
+     explore_lite submits a replacement goal. This tree performs its bounded
+     spin recovery directly after a controller failure, then returns a second
+     failure to explore_lite. That gives the controller one safe reorientation
+     without repeatedly backing up or holding a blocked frontier for multiple
+     recovery cycles.
   3) 2026-09-13: added a SmoothPath step (nav2_smoother/SimpleSmoother, see
      nav2_params.yaml) right after ComputePathToPose - the raw NavFn grid path
      was being passed straight to FollowPath, and PathAlign closely tracking
@@ -37,7 +28,9 @@
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+    <!-- Give Nav2 one collision-checked reorientation and retry, then return a
+         still-failed goal to explore_lite so it can choose another frontier. -->
+    <RecoveryNode number_of_retries="1" name="NavigateRecovery">
       <Sequence name="NavigateOnceThenFollow">
         <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
@@ -51,28 +44,17 @@
             <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
           </Sequence>
         </RecoveryNode>
-        <RecoveryNode number_of_retries="1" name="FollowPath">
-          <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
-          <Sequence>
-            <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
-            <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
-          </Sequence>
-        </RecoveryNode>
+        <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
       </Sequence>
       <Sequence>
         <Fallback>
           <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
           <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
         </Fallback>
-        <RoundRobin name="RecoveryActions">
-          <Sequence name="ClearingActions">
-            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
-            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
-          </Sequence>
-          <BackUp backup_dist="0.20" backup_speed="0.12" error_code_id="{backup_code_id}"/>
-          <Spin spin_dist="1.57" error_code_id="{spin_error_code}"/>
-          <Wait wait_duration="5.0"/>
-        </RoundRobin>
+        <!-- One collision-checked turn, followed by a fresh plan. If that
+             retry still fails, return the goal to explore_lite; do not back up
+             or erase live obstacle observations to retry the same route. -->
+        <Spin spin_dist="0.60" error_code_id="{spin_error_code}"/>
       </Sequence>
     </RecoveryNode>
   </BehaviorTree>

@@ -1,5 +1,6 @@
 import asyncio
 import mimetypes
+import math
 import json
 import time
 from datetime import datetime
@@ -84,7 +85,7 @@ def register_control_routes(
         except Exception:
             return None
 
-    def _lidar_forward_block_reason():
+    def _lidar_forward_block_reason(stop_distance_cm=None):
 
         lidar_service = getattr(movement, "lidar", None) if movement else None
 
@@ -95,7 +96,12 @@ def register_control_routes(
                 if distances:
                     front_cm = distances.get("front_cm")
 
-                    if front_cm is not None and front_cm <= float(LIDAR.get("FRONT_STOP_CM", 40)):
+                    limit_cm = float(
+                        stop_distance_cm
+                        if stop_distance_cm is not None
+                        else LIDAR.get("FRONT_STOP_CM", 40)
+                    )
+                    if front_cm is not None and front_cm <= limit_cm:
                         print(
                             "FORWARD BLOCK: lidar",
                             round(float(front_cm), 1),
@@ -274,8 +280,16 @@ def register_control_routes(
     async def drive(
         x: float = 0,
         y: float = 0,
-        source: str = ""
+        source: str = "",
+        yaw_rate_dps: float | None = None
     ):
+
+        if yaw_rate_dps is not None:
+            if not math.isfinite(yaw_rate_dps) or abs(yaw_rate_dps) > 60:
+                motor.stop()
+                raise HTTPException(status_code=400, detail="Invalid yaw rate")
+            # Preserve motion/rear-clearance checks even for a rate-only caller.
+            x = yaw_rate_dps / 60.0 * 100.0
 
         source_value = str(source).strip().lower()
         bypass_forward_safety = source_value in {"nav2", "explore", "ros2"}
@@ -316,12 +330,38 @@ def register_control_routes(
                         "distance": block["distance"]
                     }
             else:
-                # Ultrasonic is fused into Nav2's costmap (see nav2_params.yaml
-                # ultrasonic_layer), so the planner/controller already steer
-                # around what it sees; this is now just a tight last-resort
-                # failsafe for the blind gap below the lidar's minimum range.
-                ultrasonic_block = _ultrasonic_forward_block_reason(
-                    stop_distance_cm=float(ULTRASONIC.get("AUTONOMOUS_STOP_DISTANCE_CM", 12))
+                # Keep the direct LIDAR stop gate for autonomous motion. The
+                # ultrasonic check is independently configurable because its
+                # false near-field clusters can reject a Nav2 command even
+                # when the Range layer is disabled for diagnosis.
+                lidar_block = _lidar_forward_block_reason(
+                    stop_distance_cm=LIDAR.get("AUTONOMOUS_FRONT_STOP_CM", 30)
+                )
+                if lidar_block:
+                    # The hard forward gate must not suppress a simultaneous
+                    # Nav2 turn away from the obstacle. Keep translation at
+                    # zero while allowing the requested angular component.
+                    if abs(x) > 1e-3:
+                        motor.drive(
+                            x, 0, use_forward_safety=False,
+                            source=source_value, yaw_rate_dps=yaw_rate_dps,
+                        )
+                    else:
+                        motor.stop()
+                    return {
+                        "status": "BLOCKED",
+                        "reason": lidar_block["reason"],
+                        "distance": lidar_block["distance"]
+                    }
+
+                ultrasonic_block = (
+                    _ultrasonic_forward_block_reason(
+                        stop_distance_cm=float(
+                            ULTRASONIC.get("AUTONOMOUS_STOP_DISTANCE_CM", 12)
+                        )
+                    )
+                    if ULTRASONIC.get("AUTONOMOUS_FORWARD_STOP_ENABLED", True)
+                    else None
                 )
 
                 if ultrasonic_block:
@@ -331,7 +371,7 @@ def register_control_routes(
                         # freezing the whole command. Preserve the bridge's
                         # slew-limited value; amplifying it here would recreate
                         # the turn impulse that corrupts lidar scan matching.
-                        motor.drive(x, 0, use_forward_safety=False, source=source_value)
+                        motor.drive(x, 0, use_forward_safety=False, source=source_value, yaw_rate_dps=yaw_rate_dps)
                     else:
                         motor.stop()
 
@@ -358,7 +398,8 @@ def register_control_routes(
             x,
             y,
             use_forward_safety=not bypass_forward_safety,
-            source=source_value
+            source=source_value,
+            yaw_rate_dps=yaw_rate_dps
         )
 
         if not moved:
@@ -468,7 +509,11 @@ def register_control_routes(
             telemetry = motor.get_telemetry()
             enc_rl = telemetry.get("enc_rl")
             enc_rr = telemetry.get("enc_rr")
+            telemetry_sequence = telemetry.get("sequence")
+            telemetry_received_at = telemetry.get("received_at")
         except Exception:
+            telemetry_sequence = None
+            telemetry_received_at = None
             pass  # encoder ticks stay None if TELEM is stale/unavailable
 
         return {
@@ -480,7 +525,9 @@ def register_control_routes(
             "motor_x_percent": float(getattr(motor, "current_x", 0.0)),
             "motor_y_percent": float(getattr(motor, "current_y", 0.0)),
             "enc_rl": enc_rl,
-            "enc_rr": enc_rr
+            "enc_rr": enc_rr,
+            "telemetry_sequence": telemetry_sequence,
+            "telemetry_received_at": telemetry_received_at
         }
 
     @router.get("/battery/status")
@@ -569,7 +616,7 @@ def register_control_routes(
                 "stopped": True
             }
 
-        result = navigator.stop_exploration()
+        result = await asyncio.to_thread(navigator.stop_exploration)
 
         motor.stop()
 
@@ -626,7 +673,7 @@ def register_control_routes(
                 "message": "Navigation service is not available"
             }
 
-        result = navigator.start_nav2()
+        result = await asyncio.to_thread(navigator.start_nav2)
         state = navigator.status()
 
         return {
@@ -644,7 +691,7 @@ def register_control_routes(
                 "message": "Navigation service is not available"
             }
 
-        result = navigator.stop_nav2()
+        result = await asyncio.to_thread(navigator.stop_nav2)
 
         motor.stop()
 
@@ -665,7 +712,7 @@ def register_control_routes(
                 "message": "Navigation service is not available"
             }
 
-        result = navigator.start_exploration()
+        result = await asyncio.to_thread(navigator.start_exploration)
         state = navigator.status()
 
         return {
@@ -683,7 +730,7 @@ def register_control_routes(
                 "message": "Navigation service is not available"
             }
 
-        result = navigator.stop_exploration()
+        result = await asyncio.to_thread(navigator.stop_exploration)
 
         motor.stop()
 

@@ -6,6 +6,7 @@ import subprocess
 import re
 import os
 import time
+from collections import deque
 from pathlib import Path
 
 from config import MAP
@@ -16,6 +17,9 @@ class Ros2SlamService:
 
     def __init__(self):
 
+        # live_pose.json can survive an app restart. Do not compare a pose
+        # from the previous SLAM process with the first pose from this session.
+        self._mapping_session_started_at = time.time()
         self.enabled = True
         self._process = None
         self._lidar_process = None
@@ -43,6 +47,11 @@ class Ros2SlamService:
         self._last_jump_check_pose = None
         self._pose_jump_fast_turn_until = 0.0
         self._last_imu_yaw_check = None
+        # The pose exporter timestamps at roughly 1 Hz, while the ESP telemetry
+        # is available around 10 Hz.  Keeping the gyro history lets the yaw
+        # watchdog integrate the *whole* pose interval rather than estimating
+        # it from only the two endpoint rates.
+        self._gyro_z_history = deque()
         self._slam_imu_yaw_error = 0.0
         self._imu_yaw_stationary_samples = 0
         self._imu_yaw_disturbance_active = False
@@ -345,6 +354,10 @@ class Ros2SlamService:
         ):
             return None
 
+        if updated_at < self._mapping_session_started_at:
+            self._last_jump_check_pose = None
+            return None
+
         previous = self._last_jump_check_pose
         self._last_jump_check_pose = (x, y, yaw, updated_at)
 
@@ -386,65 +399,120 @@ class Ros2SlamService:
 
         return None
 
+    def record_gyro_sample(self, gyro_z_dps, sampled_at=None):
+        """Store a wall-clock gyro sample for comparison with exporter poses.
+
+        ``live_pose.json.updated_at`` is produced with ``time.time()``, so the
+        history deliberately uses that same clock.  Samples can be repeated
+        when the watchdog polls faster than the S3's 10 Hz telemetry; that is
+        harmless and represents a zero-order hold of the latest real sample.
+        """
+        try:
+            sampled_at = time.time() if sampled_at is None else float(sampled_at)
+            gyro_z = math.radians(float(gyro_z_dps))
+        except (TypeError, ValueError):
+            return
+
+        self._gyro_z_history.append((sampled_at, gyro_z))
+        history_seconds = max(4.0, float(MAP.get("MAP_IMU_YAW_HISTORY_SECONDS", 8.0)))
+        cutoff = sampled_at - history_seconds
+        while self._gyro_z_history and self._gyro_z_history[0][0] < cutoff:
+            self._gyro_z_history.popleft()
+
+        # Share the fast-turn grace with the pose-jump detector.  This is set
+        # at the gyro sampling rate, so a turn that begins and ends between two
+        # slower pose checks is still recognised as an intentional movement.
+        if abs(math.degrees(gyro_z)) >= float(MAP.get("MAP_IMU_YAW_FAST_TURN_DPS", 25.0)):
+            self._pose_jump_fast_turn_until = time.monotonic() + float(
+                MAP.get("MAP_IMU_YAW_DISTURBANCE_GRACE_SECONDS", 3.0)
+            )
+
+    def _integrated_gyro_yaw(self, start_at, end_at):
+        """Return gyro yaw change over [start_at, end_at], or None if incomplete."""
+        if end_at <= start_at or len(self._gyro_z_history) < 2:
+            return None
+
+        samples = list(self._gyro_z_history)
+        before_start = None
+        interval = []
+        for sample_at, gyro_z in samples:
+            if sample_at <= start_at:
+                before_start = (sample_at, gyro_z)
+            elif sample_at <= end_at:
+                interval.append((sample_at, gyro_z))
+            else:
+                break
+
+        # We need a sample that was already known at the beginning.  Holding
+        # the most recent value for the small exporter-to-watchdog delay at
+        # the end is valid; guessing the beginning is not.
+        if before_start is None:
+            return None
+        last_before_end = before_start if not interval else interval[-1]
+        if last_before_end[0] < end_at:
+            interval.append((end_at, last_before_end[1]))
+
+        points = [(start_at, before_start[1])]
+        points.extend(interval)
+        if len(points) < 2:
+            return None
+
+        yaw_delta = 0.0
+        peak_dps = 0.0
+        for (left_at, left_z), (right_at, right_z) in zip(points, points[1:]):
+            dt = right_at - left_at
+            if dt <= 0.0:
+                continue
+            yaw_delta += 0.5 * (left_z + right_z) * dt
+            peak_dps = max(peak_dps, abs(math.degrees(left_z)), abs(math.degrees(right_z)))
+        peak_dps = max(peak_dps, abs(math.degrees(points[-1][1])))
+        return yaw_delta, peak_dps
+
     def detect_imu_yaw_divergence(self, gyro_z_dps, robot_moving=False):
 
         try:
             payload = json.loads(self.pose_file.read_text(encoding="utf-8"))
             yaw = float(payload["yaw_rad"])
             updated_at = float(payload["updated_at"])
-            gyro_z = math.radians(float(gyro_z_dps))
+            float(gyro_z_dps)
         except Exception:
             return None
 
+        if updated_at < self._mapping_session_started_at:
+            self._last_imu_yaw_check = None
+            return None
+
         previous = self._last_imu_yaw_check
-        self._last_imu_yaw_check = (yaw, updated_at, gyro_z)
+        self._last_imu_yaw_check = (yaw, updated_at)
         if previous is None:
             return None
 
-        prev_yaw, prev_updated_at, prev_gyro_z = previous
+        prev_yaw, prev_updated_at = previous
         dt = updated_at - prev_updated_at
         if dt <= 0.0 or dt > 3.0:
             return None
 
+        gyro_integration = self._integrated_gyro_yaw(prev_updated_at, updated_at)
+        if gyro_integration is None:
+            return None
+        imu_delta, peak_gyro_dps = gyro_integration
         slam_delta = math.atan2(math.sin(yaw - prev_yaw), math.cos(yaw - prev_yaw))
-        imu_delta = 0.5 * (prev_gyro_z + gyro_z) * dt
         instantaneous_error = math.atan2(
             math.sin(slam_delta - imu_delta),
             math.cos(slam_delta - imu_delta)
         )
 
-        # 2026-09-18: a single-sample gyro/SLAM disagreement this large can't be
-        # explained by lidar motion smear at any speed this chassis can reach
-        # (max_rotational_vel 0.45 rad/s * a ~0.2s sweep is only ~5 deg of real
-        # smear) - it means the scan matcher itself locked onto a wrong-heading
-        # candidate (the documented corridor near-180-symmetry flip, see
-        # config/slam_toolbox_online_async.yaml 2026-09-14 note). This exact
-        # failure is most likely to happen WHILE the robot is turning fast
-        # (recovery Spin, or nav2 reorienting) - which is precisely the window
-        # every check below this point is designed to ignore as "expected
-        # disagreement". Check the gross case FIRST, unconditionally, so a real
-        # flip during a fast turn/recovery is no longer invisible to this
-        # watchdog (previously: repeated corridor spin-in-place incidents with
-        # no obstruction produced a badly corrupted map but zero watchdog log
-        # lines, because every relevant sample landed inside a suppressed
-        # fast-turn or recovery window).
-        # 2026-09-19 correction: the "~5 deg of real smear" estimate above
-        # assumed max real rotation stays near max_rotational_vel (0.45 rad/s).
-        # Live gyro measurement this session disproved that - ordinary
-        # nav2-commanded turns routinely hit 35-70+ deg/s and up to ~90-100
-        # deg/s at the turn-percent ceiling (a single ~150-200ms lidar sweep
-        # can smear ~13-20 deg of real heading at those rates). This raises
-        # (not lowers) the odds of a genuine scan-matcher ambiguity during a
-        # fast turn in a feature-poor space - see the coarse_search_angle_offset
-        # narrowing in config/slam_toolbox_online_async.yaml, the actual
-        # mitigation attempt for this. The gross-error check here stays
-        # unconditional regardless - it is the safety net, not the fix.
+        # The gross case remains an unconditional map-corruption alarm.  It is
+        # now compared with the integrated gyro history above, not two sparse
+        # endpoint rates: a quick real turn that begins and ends at low speed
+        # therefore cannot masquerade as a SLAM heading jump.
         gross_error = math.radians(float(MAP.get("MAP_IMU_YAW_GROSS_ERROR_DEG", 45.0)))
         if abs(instantaneous_error) >= gross_error:
             return {
                 "slam_imu_yaw_error_deg": math.degrees(instantaneous_error),
                 "slam_delta_deg": math.degrees(slam_delta),
                 "imu_delta_deg": math.degrees(imu_delta),
+                "peak_gyro_dps": peak_gyro_dps,
                 "dt_sec": dt,
                 "gross": True
             }
@@ -517,21 +585,43 @@ class Ros2SlamService:
         # ros2_cmdvel_bridge.py no longer owns odom pose/TF - robot_localization's
         # EKF does (see config/ekf.yaml), so resetting odom means resetting the
         # EKF's internal state estimate via its own native set_pose service.
-        odom_reset = self._run_ros2_command(
-            "ros2 service call /set_pose "
-            "robot_localization/srv/SetPose "
-            "'{pose: {header: {frame_id: odom}, "
-            "pose: {pose: {orientation: {w: 1.0}}}}}'",
-            timeout=5
-        )
-        odom_reset_ok = odom_reset.returncode == 0
+        odom_reset_ok = False
+        odom_reset_error = None
+        try:
+            odom_reset = self._run_ros2_command(
+                "ros2 service call /set_pose "
+                "robot_localization/srv/SetPose "
+                "'{pose: {header: {frame_id: odom}, "
+                "pose: {pose: {orientation: {w: 1.0}}}}}'",
+                timeout=5
+            )
+            odom_reset_ok = odom_reset.returncode == 0
+            if not odom_reset_ok:
+                odom_reset_error = (
+                    odom_reset.stderr or odom_reset.stdout or "set_pose failed"
+                ).strip()[:240]
+        except Exception as exc:
+            # Nav2 may be stopped, which also removes EKF's /set_pose service.
+            # Still clear/restart SLAM; a missing odometry service must not
+            # leave the old map running after its exported files were deleted.
+            odom_reset_error = repr(exc)[:240]
 
-        completed = self._run_ros2_command(
-            "ros2 service call /slam_toolbox/clear_changes slam_toolbox/srv/Clear '{}'",
-            timeout=20
-        )
-
-        clear_ok = completed.returncode == 0
+        clear_ok = False
+        clear_error = None
+        try:
+            completed = self._run_ros2_command(
+                "ros2 service call /slam_toolbox/clear_changes slam_toolbox/srv/Clear '{}'",
+                timeout=20
+            )
+            clear_ok = completed.returncode == 0
+            if not clear_ok:
+                clear_error = (
+                    completed.stderr or completed.stdout or "clear_changes failed"
+                ).strip()[:240]
+        except Exception as exc:
+            # A missing/unresponsive SLAM service is handled by the cold
+            # process restart below.
+            clear_error = repr(exc)[:240]
 
         for process in (self._process, self._scan_process, self._slam_process, self._lidar_process):
             if process is None:
@@ -549,11 +639,13 @@ class Ros2SlamService:
         self._last_jump_check_pose = None
         self._pose_jump_fast_turn_until = 0.0
         self._last_imu_yaw_check = None
+        self._gyro_z_history.clear()
         self._slam_imu_yaw_error = 0.0
         self._imu_yaw_stationary_samples = 0
         self._imu_yaw_disturbance_active = False
         self._imu_yaw_disturbance_until = 0.0
 
+        self._mapping_session_started_at = time.time()
         self._restart_stack_after_reset()
 
         outputs_ready = self._wait_for_map_outputs(timeout_sec=20.0)
@@ -563,7 +655,10 @@ class Ros2SlamService:
             note = "ok"
         else:
             mode = "slam_cold_restart"
-            note = (completed.stderr or completed.stdout or "slam_toolbox clear_changes failed").strip()[:240]
+            note = clear_error or "slam_toolbox clear_changes failed"
+
+        if not odom_reset_ok:
+            note = f"{note}; odom reset skipped/failed: {odom_reset_error or 'unknown'}"
 
         if not outputs_ready:
             note = f"{note}; map outputs not ready within timeout"

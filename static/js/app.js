@@ -462,6 +462,7 @@ window.addEventListener(
         );
 
         let mapVisible = false;
+        let mapRefreshInFlight = false;
 
         function formatMapTimestamp(value) {
 
@@ -602,6 +603,29 @@ window.addEventListener(
 
             await drawRobotOverlay();
             mapStatus.textContent = "Guncel harita gosteriliyor.";
+        }
+
+        async function refreshMapView() {
+
+            if (mapRefreshInFlight) {
+                return;
+            }
+
+            mapRefreshInFlight = true;
+
+            try {
+                await Promise.all([
+                    refreshMapHealth(),
+                    loadMapImage()
+                ]);
+            } catch (error) {
+                console.warn("Map refresh failed", error);
+                if (mapStatus) {
+                    mapStatus.textContent = "Harita yenilenemedi.";
+                }
+            } finally {
+                mapRefreshInFlight = false;
+            }
         }
 
         function clearMapOverlay() {
@@ -770,20 +794,7 @@ window.addEventListener(
                     setMapVisible(nextVisible);
 
                     if (nextVisible) {
-                        Promise.all([
-                            refreshMapHealth(),
-                            loadMapImage()
-                        ])
-                            .catch((error) => {
-                                console.warn(
-                                    "Map load failed",
-                                    error
-                                );
-
-                                if (mapStatus) {
-                                    mapStatus.textContent = "Harita yuklenemedi.";
-                                }
-                            });
+                        refreshMapView();
                     }
                 }
             );
@@ -792,22 +803,17 @@ window.addEventListener(
         if (mapRefreshButton) {
             mapRefreshButton.addEventListener(
                 "click",
-                () => Promise.all([
-                    refreshMapHealth(),
-                    loadMapImage()
-                ])
-                    .catch((error) => {
-                        console.warn(
-                            "Map refresh failed",
-                            error
-                        );
-
-                        if (mapStatus) {
-                            mapStatus.textContent = "Harita yenilenemedi.";
-                        }
-                    })
+                () => refreshMapView()
             );
         }
+
+        // The live SLAM map and robot pose keep changing while the panel is open.
+        // Refresh both together so the image and pose marker cannot remain stale.
+        window.setInterval(() => {
+            if (mapVisible) {
+                refreshMapView();
+            }
+        }, 2000);
 
         if (mapResetButton) {
             mapResetButton.addEventListener(

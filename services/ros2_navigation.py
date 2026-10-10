@@ -1,7 +1,9 @@
 import os
+import json
 import shlex
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -16,6 +18,8 @@ class Ros2NavigationService:
         self.enabled = bool(MAP.get("ROS2_NAV2_ENABLED", True))
         self._nav2_process = None
         self._explore_process = None
+        self._explore_state_lock = threading.Lock()
+        self._explore_generation = 0
         # True whenever the caller last asked for autonomous exploration to be
         # running (set in start_exploration(), cleared in stop_exploration()),
         # independent of explore_lite's current live/dead process state.
@@ -101,7 +105,7 @@ class Ros2NavigationService:
             except Exception:
                 pass
 
-    def _cleanup_stale_processes(self):
+    def _cleanup_stale_processes(self, include_odometry=True):
 
         names = [
             "lifecycle_manager",
@@ -115,9 +119,10 @@ class Ros2NavigationService:
             "velocity_smoother",
             "collision_monitor",
             "opennav_docking",
-            "explore",
-            "ekf_node"
+            "explore"
         ]
+        if include_odometry:
+            names.append("ekf_node")
 
         for name in names:
             try:
@@ -135,11 +140,10 @@ class Ros2NavigationService:
             "ros2 launch nav2_bringup",
             "lifecycle_manager_navigation",
             "ros2 launch explore_lite",
-            "explore_node",
-            "ros2_cmdvel_bridge.py",
-            "ros2_imu_bridge.py",
-            "ekf_node"
+            "explore_node"
         ]
+        if include_odometry:
+            patterns.extend(("ros2_cmdvel_bridge.py", "ros2_imu_bridge.py", "ekf_node"))
 
         for pattern in patterns:
             try:
@@ -225,7 +229,16 @@ class Ros2NavigationService:
         if no_frontiers_at > goal_at:
             return False, "no_frontiers"
 
-        if goal_at >= 0:
+        no_safe_frontier_at = text.rfind("No frontier target below cost")
+        if no_safe_frontier_at > goal_at:
+            return False, "no_safe_frontier"
+
+        goal_finished_at = max(
+            text.rfind("Goal was successful"),
+            text.rfind("Goal aborted"),
+            text.rfind("Goal was canceled")
+        )
+        if goal_at >= 0 and goal_at > goal_finished_at:
             return True, "goal_active"
 
         return False, "starting"
@@ -253,23 +266,32 @@ class Ros2NavigationService:
         odom_frame = str(MAP.get("ROS2_ODOM_FRAME", "odom"))
         base_frame = str(MAP.get("ROS2_BASE_FRAME", "base_link"))
         laser_frame = str(MAP.get("ROS2_LIDAR_FRAME_ID", "laser"))
-        laser_x_offset = float(MAP.get("ROS2_LIDAR_X_OFFSET_M", -0.085))
+        laser_x_offset = float(MAP.get("ROS2_LIDAR_X_OFFSET_M", 0.07))
+        ultrasonic_x_offset = float(MAP.get("ROS2_ULTRASONIC_X_OFFSET_M", 0.27))
         ros_python_bin = self._ros_python_bin
         max_linear_x = float(MAP.get("ROS2_NAV2_MAX_LINEAR_X", 0.24))
-        max_angular_z = float(MAP.get("ROS2_NAV2_MAX_ANGULAR_Z", 1.0))
+        max_angular_z = float(MAP.get("ROS2_NAV2_MAX_ANGULAR_Z", 0.45))
         max_drive_percent = float(MAP.get("ROS2_NAV2_MAX_DRIVE_PERCENT", 38.0))
-        max_turn_percent = float(MAP.get("ROS2_NAV2_MAX_TURN_PERCENT", 46.0))
+        max_turn_percent = float(MAP.get("ROS2_NAV2_MAX_TURN_PERCENT", 100.0))
+        yaw_rate_option = "--s3-yaw-rate-control " if MAP.get("ROS2_S3_YAW_RATE_CONTROL", False) else ""
         angular_slew_rate = float(MAP.get("ROS2_NAV2_ANGULAR_SLEW_RATE", 0.45))
         min_linear_scale_at_max_turn = float(
             MAP.get("ROS2_NAV2_MIN_LINEAR_SCALE_AT_MAX_TURN", 0.25)
         )
+        fixed_pwm = int(MAP.get("ROS2_NAV2_FIXED_PWM", 0))
+        fixed_pwm_stop_latency_sec = float(
+            MAP.get("ROS2_NAV2_FIXED_PWM_STOP_LATENCY_SECONDS", 0.04)
+        )
+        drive_rate_hz = float(MAP.get("ROS2_CMDVEL_DRIVE_RATE_HZ", 50.0))
         odom_rate_hz = float(MAP.get("ROS2_CMDVEL_ODOM_RATE_HZ", 50.0))
+        encoder_sample_rate_hz = float(MAP.get("ROS2_CMDVEL_ENCODER_SAMPLE_RATE_HZ", 50.0))
         odom_vx_variance = float(MAP.get("ROS2_ODOM_VX_VARIANCE", 0.01))
         odom_vyaw_variance = float(MAP.get("ROS2_ODOM_VYAW_VARIANCE", 0.05))
         encoder_odom_source_enabled = bool(MAP.get("ROS2_CMDVEL_ENCODER_ODOM_SOURCE_ENABLED", True))
         encoder_ticks_per_meter = float(MAP.get("ROS2_ENCODER_TICKS_PER_METER", 21786.0))
         encoder_track_width_m = float(MAP.get("ROS2_ENCODER_TRACK_WIDTH_M", 0.243))
         encoder_max_age_sec = float(MAP.get("ROS2_ENCODER_MAX_AGE_SECONDS", 0.5))
+        encoder_max_tick_rate = float(MAP.get("ROS2_ENCODER_MAX_TICK_RATE", 15000.0))
 
         if not Path(ros_python_bin).exists():
             return {
@@ -291,19 +313,26 @@ class Ros2NavigationService:
             f"--base-frame {shlex.quote(base_frame)} "
             f"--laser-frame {shlex.quote(laser_frame)} "
             f"--laser-x-offset {shlex.quote(str(laser_x_offset))} "
+            f"--ultrasonic-x-offset {shlex.quote(str(ultrasonic_x_offset))} "
             f"--max-linear-x {shlex.quote(str(max_linear_x))} "
             f"--max-angular-z {shlex.quote(str(max_angular_z))} "
             f"--max-drive-percent {shlex.quote(str(max_drive_percent))} "
             f"--max-turn-percent {shlex.quote(str(max_turn_percent))} "
+            f"{yaw_rate_option}"
             f"--angular-slew-rate {shlex.quote(str(angular_slew_rate))} "
             f"--min-linear-scale-at-max-turn {shlex.quote(str(min_linear_scale_at_max_turn))} "
+            f"--fixed-pwm {shlex.quote(str(fixed_pwm))} "
+            f"--fixed-pwm-stop-latency-sec {shlex.quote(str(fixed_pwm_stop_latency_sec))} "
+            f"--drive-rate-hz {shlex.quote(str(drive_rate_hz))} "
             f"--odom-rate-hz {shlex.quote(str(odom_rate_hz))} "
+            f"--imu-rate-hz {shlex.quote(str(encoder_sample_rate_hz))} "
             f"--odom-vx-variance {shlex.quote(str(odom_vx_variance))} "
             f"--odom-vyaw-variance {shlex.quote(str(odom_vyaw_variance))} "
             f"--encoder-odom-source-enabled {shlex.quote(str(encoder_odom_source_enabled))} "
             f"--encoder-ticks-per-meter {shlex.quote(str(encoder_ticks_per_meter))} "
             f"--encoder-track-width-m {shlex.quote(str(encoder_track_width_m))} "
             f"--encoder-max-age-sec {shlex.quote(str(encoder_max_age_sec))} "
+            f"--encoder-max-tick-rate {shlex.quote(str(encoder_max_tick_rate))} "
             f">> {shlex.quote(str(self._cmdvel_bridge_log))} 2>&1"
         )
 
@@ -434,18 +463,22 @@ class Ros2NavigationService:
 
     def _wait_for_tf_pair(self, parent_frame, child_frame, timeout_sec=20):
 
-        tf_topic = str(MAP.get("ROS2_TF_TOPIC", "/tf"))
         deadline = time.time() + max(1.0, float(timeout_sec))
 
         while time.time() < deadline:
-            command = f"timeout 2 ros2 topic echo {shlex.quote(tf_topic)} --once"
-            completed = self._run_ros2_command(command, timeout=5)
+            # /tf carries TFMessage batches from multiple publishers. Reading
+            # one message and searching its YAML can miss a valid frame pair,
+            # and a two-second CLI timeout is shorter than cold DDS discovery
+            # on the Pi. Ask tf2 to resolve the pair from its transform buffer.
+            probe_timeout = 5
+            command = (
+                f"timeout {probe_timeout} ros2 run tf2_ros tf2_echo "
+                f"{shlex.quote(parent_frame)} {shlex.quote(child_frame)}"
+            )
+            completed = self._run_ros2_command(command, timeout=probe_timeout + 3)
             output = f"{completed.stdout}\n{completed.stderr}"
 
-            if (
-                f"frame_id: {parent_frame}" in output
-                and f"child_frame_id: {child_frame}" in output
-            ):
+            if "Translation:" in output and "Rotation:" in output:
                 return True
 
             time.sleep(0.25)
@@ -476,28 +509,36 @@ class Ros2NavigationService:
         return False
 
     def _wait_for_global_costmap_ready(self, timeout_sec=15):
-
-        # 2026-09-19: was defaulting to "/global_costmap/costmap" (nav2's own
-        # costmap), which is the WRONG topic - explore_lite's Explore
-        # constructor calls makePlan() synchronously, before rclpy starts
-        # spinning, against its own Costmap2DClient, which is subscribed to
-        # whatever "costmap_topic" explore_lite_params.yaml sets - here
-        # that's "/map" (slam_toolbox's raw output), not nav2's global
-        # costmap. nav2's global costmap can still hold stale data (or get
-        # refreshed from its own static/sensor layers) even while
-        # slam_toolbox's /map has published nothing yet post-reset, so the
-        # old check could return "ready" before explore_lite's own costmap
-        # client had anything to size itself against - explaining why
-        # explore_lite's first frontier search would find a still-empty,
-        # zero-sized costmap and fail with "Robot out of costmap bounds" on
-        # its very first (constructor-time) makePlan() call, every time.
-        costmap_topic = str(MAP.get("ROS2_EXPLORE_COSTMAP_TOPIC", "/map"))
-        command = (
-            f"timeout {int(max(1, timeout_sec))} "
-            f"ros2 topic echo {shlex.quote(costmap_topic)} --once >/dev/null"
-        )
-        completed = self._run_ros2_command(command, timeout=int(timeout_sec) + 3)
-        return completed.returncode == 0
+        # /map can publish while its bounding box does not contain the robot
+        # after an EKF/SLAM reset. In that state explore_lite cannot search
+        # frontiers, regardless of Nav2's global costmap readiness. The SLAM
+        # exporter receives both /map and map->base_link, so require its two
+        # fresh snapshots to agree before launching Explore.
+        output_dir = Path(MAP.get("DIR", "output/maps")).expanduser()
+        pose_file = output_dir / MAP.get("ROS2_EXPORT_POSE_FILE", "live_pose.json")
+        meta_file = output_dir / MAP.get("ROS2_EXPORT_META_FILE", "live_map_meta.json")
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        while True:
+            try:
+                pose = json.loads(pose_file.read_text(encoding="utf-8"))
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                now = time.time()
+                resolution = float(meta["resolution"])
+                x = float(pose["x"])
+                y = float(pose["y"])
+                origin_x = float(meta["origin"]["x"])
+                origin_y = float(meta["origin"]["y"])
+                if (0 < now - float(pose["updated_at"]) < 5.0 and
+                        0 < now - float(meta["updated_at"]) < 5.0 and
+                        resolution > 0 and
+                        origin_x <= x < origin_x + int(meta["width"]) * resolution and
+                        origin_y <= y < origin_y + int(meta["height"]) * resolution):
+                    return True
+            except (OSError, ValueError, TypeError, KeyError):
+                pass
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.25)
 
     def start_nav2(self):
 
@@ -526,13 +567,11 @@ class Ros2NavigationService:
                 "message": f"Nav2 package check failed: {package_check.get('message', 'unknown error')}"
             }
 
-        # Ensure stale Nav2/explore processes from previous runs do not poison lifecycle bringup.
-        self._cleanup_stale_processes()
+        # Keep the odometry/IMU/EKF chain alive across Nav2 stops. SLAM keeps
+        # running and must never lose odom->base_link while Nav2 is off.
+        self._cleanup_stale_processes(include_odometry=False)
         self._nav2_process = None
         self._explore_process = None
-        self._cmdvel_bridge_process = None
-        self._imu_bridge_process = None
-        self._ekf_process = None
 
         bridge_result = self._start_cmdvel_bridge()
         if bridge_result.get("status") != "OK":
@@ -540,20 +579,14 @@ class Ros2NavigationService:
 
         imu_bridge_result = self._start_imu_bridge()
         if imu_bridge_result.get("status") != "OK":
-            self._stop_cmdvel_bridge()
             return imu_bridge_result
 
         ekf_result = self._start_ekf()
         if ekf_result.get("status") != "OK":
-            self._stop_imu_bridge()
-            self._stop_cmdvel_bridge()
             return ekf_result
 
         # Avoid Nav2 lifecycle activation races by waiting for odom/TF publication.
         if not self._wait_for_cmdvel_bridge_ready(timeout_sec=8):
-            self._stop_ekf()
-            self._stop_imu_bridge()
-            self._stop_cmdvel_bridge()
             return {
                 "status": "ERROR",
                 "message": "EKF did not publish fused odom in time"
@@ -563,9 +596,6 @@ class Ros2NavigationService:
             map_frame = str(MAP.get("ROS2_MAP_FRAME", "map"))
             odom_frame = str(MAP.get("ROS2_ODOM_FRAME", "odom"))
             base_frame = str(MAP.get("ROS2_BASE_FRAME", "base_link"))
-            self._stop_ekf()
-            self._stop_imu_bridge()
-            self._stop_cmdvel_bridge()
             return {
                 "status": "ERROR",
                 "message": (
@@ -604,9 +634,6 @@ class Ros2NavigationService:
         self.stop_exploration()
         self._terminate_process_group(self._nav2_process)
         self._nav2_process = None
-        self._stop_ekf()
-        self._stop_imu_bridge()
-        self._stop_cmdvel_bridge()
 
         return {
             "status": "OK",
@@ -621,11 +648,26 @@ class Ros2NavigationService:
                 "message": "Navigation service disabled"
             }
 
-        self._exploration_intent = True
+        with self._explore_state_lock:
+            self._explore_generation += 1
+            generation = self._explore_generation
+            self._exploration_intent = True
+
+        def canceled():
+            with self._explore_state_lock:
+                return (generation != self._explore_generation or
+                        not self._exploration_intent)
+
+        canceled_result = {
+            "status": "CANCELED",
+            "message": "Exploration start canceled by stop request"
+        }
 
         nav2_result = self.start_nav2()
         if nav2_result.get("status") != "OK":
             return nav2_result
+        if canceled():
+            return canceled_result
 
         if self._explore_process is not None and self._explore_process.poll() is None:
             explore_active, explore_reason = self._exploration_activity()
@@ -640,6 +682,8 @@ class Ros2NavigationService:
             self._explore_process = None
 
         package_check = self._ensure_package_available(self._explore_launch_package)
+        if canceled():
+            return canceled_result
         if package_check.get("status") != "OK":
             return {
                 "status": "ERROR",
@@ -663,6 +707,8 @@ class Ros2NavigationService:
                 "status": "ERROR",
                 "message": "global_costmap not ready before explore_lite launch"
             }
+        if canceled():
+            return canceled_result
 
         # Give slam_toolbox a few scan-match cycles against the (mostly
         # stationary) robot before explore_lite starts chasing frontiers, so
@@ -671,6 +717,8 @@ class Ros2NavigationService:
         settle_seconds = float(MAP.get("EXPLORE_STARTUP_SETTLE_SECONDS", 0.0))
         if settle_seconds > 0:
             time.sleep(settle_seconds)
+        if canceled():
+            return canceled_result
 
         # explore_lite's launch file does not expose a params_file argument. Run the
         # node directly so frontier discovery uses our tuned raw SLAM map settings;
@@ -710,7 +758,13 @@ class Ros2NavigationService:
         # the race once in that colder-start scenario.
         max_attempts = 5
         for attempt in range(1, max_attempts + 1):
-            self._explore_process = self._spawn_command(shell_cmd)
+            # A stop request can arrive while costmap readiness or TF startup
+            # is still pending. Check and spawn under the same lock so a late
+            # start cannot resurrect Explore after /explore/stop returned.
+            with self._explore_state_lock:
+                if generation != self._explore_generation or not self._exploration_intent:
+                    return canceled_result
+                self._explore_process = self._spawn_command(shell_cmd)
             spawn_time = time.time()
             # growing settle before the first activity check on later
             # attempts, in case TF just needs a bit more warm-up time.
@@ -718,6 +772,8 @@ class Ros2NavigationService:
 
             hit_startup_race = False
             while time.time() - spawn_time < 10.0:
+                if canceled():
+                    return canceled_result
                 explore_active, explore_reason = self._exploration_activity()
                 if explore_active:
                     break
@@ -729,12 +785,18 @@ class Ros2NavigationService:
             if not hit_startup_race or attempt == max_attempts:
                 break
 
+            if canceled():
+                return canceled_result
+
             self._terminate_process_group(self._explore_process)
             self._explore_process = None
 
             # Retrying a launch is safe. Do not inject a motor command to
             # repair a startup race; report a persistent no-frontier state.
             time.sleep(1.0)
+
+        if canceled():
+            return canceled_result
 
         return {
             "status": "OK",
@@ -745,9 +807,12 @@ class Ros2NavigationService:
 
     def stop_exploration(self):
 
-        self._exploration_intent = False
-        self._terminate_process_group(self._explore_process)
-        self._explore_process = None
+        with self._explore_state_lock:
+            self._exploration_intent = False
+            self._explore_generation += 1
+            process = self._explore_process
+            self._explore_process = None
+        self._terminate_process_group(process)
 
         return {
             "status": "OK",
@@ -791,3 +856,6 @@ class Ros2NavigationService:
 
         self.stop_exploration()
         self.stop_nav2()
+        self._stop_ekf()
+        self._stop_imu_bridge()
+        self._stop_cmdvel_bridge()
