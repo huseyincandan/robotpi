@@ -45,30 +45,26 @@ controller_server:
       plugin: "nav2_controller::PoseProgressChecker"
       required_movement_radius: 0.05
       required_movement_angle: 0.20
-      # Detect a genuinely stalled goal within 15 s; the bounded recovery
-      # tree then makes one escape attempt before returning a second failure
-      # to explore_lite. Its 120 s watchdog remains above this allowance.
-      movement_time_allowance: 15.0
+      # A low obstacle below the laser can stop the chassis while the wheels
+      # keep turning. Do not push against it for 15 s before trying the
+      # collision-checked backup; allow brief starts and controller pauses.
+      movement_time_allowance: 4.0
 
     goal_checker:
-      plugin: "nav2_controller::SimpleGoalChecker"
+      # Frontier goals are observation positions, not required final headings.
+      # Requiring a yaw match made the robot turn in place next to a wall after
+      # reaching the goal XY, then fail its progress check.
+      plugin: "nav2_controller::PositionGoalChecker"
       # 1cm was unrealistic for real LIDAR/odom noise - the controller could
       # spend the whole progress-check window hunting for exact precision.
       xy_goal_tolerance: 0.10
-      yaw_goal_tolerance: 0.35
       stateful: true
 
     FollowPath:
-      # Jazzy RPP tests the lookahead/carrot position for final rotation.
-      # That can stop translation just outside the goal checker's XY radius.
-      # The shim uses the actual robot/goal poses for the final-heading handoff.
-      plugin: "nav2_rotation_shim_controller::RotationShimController"
-      primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      angular_dist_threshold: 0.70
-      angular_disengage_threshold: 0.35
-      rotate_to_heading_once: true
-      rotate_to_goal_heading: true
-      rotate_to_heading_angular_vel: 0.30
+      # The differential-drive lattice emits forward paths with in-place
+      # turns. RPP must align to those headings instead of reversing toward a
+      # lookahead point behind the robot.
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
       desired_linear_vel: 0.144
       lookahead_dist: 0.30
       use_velocity_scaled_lookahead_dist: false
@@ -80,7 +76,7 @@ controller_server:
       regulated_linear_scaling_min_radius: 0.50
       regulated_linear_scaling_min_speed: 0.11
       use_cost_regulated_linear_velocity_scaling: false
-      use_rotate_to_heading: false
+      use_rotate_to_heading: true
       rotate_to_heading_min_angle: 0.70
       rotate_to_heading_angular_vel: 0.30
       # At 8 Hz, 0.20 rad/s² allowed only 0.025 rad/s from stationary.
@@ -97,21 +93,24 @@ planner_server:
     expected_planner_frequency: 3.0
     planner_plugins: ["GridBased"]
     GridBased:
-      plugin: "nav2_navfn_planner::NavfnPlanner"
-      tolerance: 0.5
-      use_astar: false
+      # Differential-drive motion primitives generated at 5 cm resolution and
+      # 18 cm turning radius; in-place turns avoid short reverse/forward cusps.
+      plugin: "nav2_smac_planner::SmacPlannerLattice"
+      tolerance: 0.10
       allow_unknown: true
+      max_planning_time: 3.0
+      lattice_filepath: "/home/robotpi/projects/robotpi/config/lattice_primitives_diff_18cm.json"
+      allow_reverse_expansion: false
+      analytic_expansion_max_length: 1.0
+      reverse_penalty: 1.5
+      smooth_path: false
 
 smoother_server:
   ros__parameters:
     use_sim_time: false
     smoother_plugins: ["SimpleSmoother"]
-    # 2026-09-13: the raw NavFn grid path (0.05m cells) was being handed
-    # straight to FollowPath with no smoothing at all - PathAlign then closely
-    # tracks every small grid-stairstep in that path, which looks like
-    # excessive side-to-side reorientation over what should be a straight
-    # corridor run. Wired into the BT (see nav2_bt_recovery_backup_first.xml)
-    # as a SmoothPath step between ComputePathToPose and FollowPath.
+    # Retained for other actions; the exploration BT does not smooth a
+    # collision-checked State Lattice path.
     SimpleSmoother:
       plugin: "nav2_smoother::SimpleSmoother"
       tolerance: 1.0e-10
@@ -185,11 +184,9 @@ local_costmap:
       # hack that faked a 5-beam LaserScan through ObstacleLayer.
       range_layer:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        # TEMPORARY A/B TEST: isolate whether the ultrasonic Range layer is
-        # driving Nav2's false front-obstacle decisions. Keep the ultrasonic
-        # topic published and retain the LIDAR obstacle layer; restore true
-        # after the supervised short test.
-        enabled: false
+        # Only fresh, stable full-window readings are published by the bridge.
+        # Include low obstacles below the LiDAR plane in collision checks.
+        enabled: true
         topics: ["/ultrasonic_range"]
         phi: 1.2
         inflate_cone: 1.0
@@ -238,8 +235,7 @@ global_costmap:
           obstacle_max_range: 4.5
       range_layer:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        # TEMPORARY A/B TEST: see the matching local_costmap setting above.
-        enabled: false
+        enabled: true
         topics: ["/ultrasonic_range"]
         phi: 1.2
         inflate_cone: 1.0

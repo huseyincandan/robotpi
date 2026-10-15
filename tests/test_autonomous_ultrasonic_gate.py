@@ -81,6 +81,18 @@ class AutonomousUltrasonicGateTests(unittest.TestCase):
         self.assertGreater(self.motor.ultrasonic_reads, 0)
         self.assertEqual(self.motor.drive_calls, [])
 
+    def test_autonomous_near_field_stop_keeps_turn_available(self):
+        ULTRASONIC["AUTONOMOUS_FORWARD_STOP_ENABLED"] = True
+
+        response = self.client.get(
+            "/drive", params={"x": 20, "y": 30, "source": "nav2"}
+        )
+
+        self.assertEqual(response.json()["status"], "BLOCKED")
+        self.assertEqual(response.json()["reason"], "ultrasonic")
+        self.assertEqual(self.motor.drive_calls[0][:2], (20, 0))
+        self.assertEqual(self.motor.stop_calls, 0)
+
     def test_autonomous_lidar_gate_keeps_turn_while_blocking_forward(self):
         self.lidar.front_cm = 27.5
         ULTRASONIC["AUTONOMOUS_FORWARD_STOP_ENABLED"] = False

@@ -1,5 +1,5 @@
 diff --git a/explore/include/explore/explore.h b/explore/include/explore/explore.h
-index 8799783..bcf88b7 100644
+index 8799783..852cbb7 100644
 --- a/explore/include/explore/explore.h
 +++ b/explore/include/explore/explore.h
 @@ -40,6 +40,7 @@
@@ -51,12 +51,13 @@ index 8799783..bcf88b7 100644
    rclcpp::Time last_progress_;
    size_t last_markers_count_;
  
-@@ -138,13 +149,17 @@ private:
+@@ -138,13 +149,18 @@ private:
  
    // parameters
    double planner_frequency_;
 -  double potential_scale_, orientation_scale_, gain_scale_;
 +  double potential_scale_, orientation_scale_, gain_scale_, min_goal_distance_, frontier_goal_standoff_;
++  double frontier_goal_max_standoff_;
 +  int frontier_goal_max_cost_{100};
    double progress_timeout_;
    bool visualize_;
@@ -86,25 +87,28 @@ index ae2da83..c7d33e6 100644
    auto& clk = *node_.get_clock();
  
 diff --git a/explore/src/explore.cpp b/explore/src/explore.cpp
-index d72fb18..a66b970 100644
+index d72fb18..b27598c 100644
 --- a/explore/src/explore.cpp
 +++ b/explore/src/explore.cpp
-@@ -70,6 +70,9 @@ Explore::Explore()
+@@ -70,6 +70,10 @@ Explore::Explore()
    this->declare_parameter<float>("gain_scale", 1.0);
    this->declare_parameter<float>("min_frontier_size", 0.5);
    this->declare_parameter<bool>("return_to_init", false);
 +  this->declare_parameter<float>("min_goal_distance", 0.45);
 +  this->declare_parameter<float>("frontier_goal_standoff", 0.35);
++  this->declare_parameter<float>("frontier_goal_max_standoff", 1.0);
 +  this->declare_parameter<int>("frontier_goal_max_cost", 100);
  
    this->get_parameter("planner_frequency", planner_frequency_);
    this->get_parameter("progress_timeout", timeout);
-@@ -79,12 +82,25 @@ Explore::Explore()
+@@ -79,12 +83,27 @@ Explore::Explore()
    this->get_parameter("gain_scale", gain_scale_);
    this->get_parameter("min_frontier_size", min_frontier_size);
    this->get_parameter("return_to_init", return_to_init_);
 +  this->get_parameter("min_goal_distance", min_goal_distance_);
 +  this->get_parameter("frontier_goal_standoff", frontier_goal_standoff_);
++  this->get_parameter("frontier_goal_max_standoff", frontier_goal_max_standoff_);
++  frontier_goal_max_standoff_ = std::max(frontier_goal_max_standoff_, frontier_goal_standoff_);
 +  this->get_parameter("frontier_goal_max_cost", frontier_goal_max_cost_);
    this->get_parameter("robot_base_frame", robot_base_frame_);
  
@@ -125,7 +129,7 @@ index d72fb18..a66b970 100644
  
    search_ = frontier_exploration::FrontierSearch(costmap_client_.getCostmap(),
                                                   potential_scale_, gain_scale_,
-@@ -228,8 +244,66 @@ void Explore::visualizeFrontiers(
+@@ -228,8 +247,66 @@ void Explore::visualizeFrontiers(
  
  void Explore::makePlan()
  {
@@ -192,7 +196,7 @@ index d72fb18..a66b970 100644
    // get frontiers sorted according to cost
    auto frontiers = search_.searchFrom(pose.position);
    RCLCPP_DEBUG(logger_, "found %lu frontiers", frontiers.size());
-@@ -251,21 +325,162 @@ void Explore::makePlan()
+@@ -251,21 +328,285 @@ void Explore::makePlan()
      visualizeFrontiers(frontiers);
    }
  
@@ -224,7 +228,10 @@ index d72fb18..a66b970 100644
 +  const double forward_x = std::cos(heading);
 +  const double forward_y = std::sin(heading);
 +  geometry_msgs::msg::Point boundary_position;
++  geometry_msgs::msg::Point safe_target_position;
 +  double distance_to_boundary = 0.0;
++  double selected_standoff = frontier_goal_standoff_;
++  bool selectedCostmapGoal = false;
 +  bool selectedForwardFrontier = false;
 +  size_t rejectedDistance = 0, rejectedDirection = 0;
 +  size_t rejectedCostmap = 0, rejectedBounds = 0, rejectedCost = 0;
@@ -238,6 +245,7 @@ index d72fb18..a66b970 100644
 +      double bestScore = std::numeric_limits<double>::infinity();
 +      geometry_msgs::msg::Point candidateBoundary;
 +      double candidateDistance = 0.0;
++      double candidateStandoff = frontier_goal_standoff_;
 +      for (const auto& point : candidate->points) {
 +        const double pointDx = point.x - pose.position.x;
 +        const double pointDy = point.y - pose.position.y;
@@ -246,13 +254,10 @@ index d72fb18..a66b970 100644
 +        const double forwardness = (pointDx * forward_x + pointDy * forward_y) / distance;
 +        if (forwardness < minimumForwardness) { ++rejectedDirection; continue; }
 +
-+        // A radial standoff from a frontier cell does not guarantee clearance
-+        // from the nearest wall (the wall may be off-axis). Check the actual
-+        // Nav2 global costmap cell for the resulting free-side target and
-+        // reject goals inside inflated/high-cost obstacle areas.
-+        geometry_msgs::msg::Point candidateTarget = point;
-+        candidateTarget.x -= frontier_goal_standoff_ * pointDx / distance;
-+        candidateTarget.y -= frontier_goal_standoff_ * pointDy / distance;
++        // A fixed standoff can put every target in another wall's inflated
++        // band. Search progressively farther back on the known-free side,
++        // while retaining a minimum travel distance from the robot. Never
++        // relax the cost threshold to make an unsafe cell pass.
 +        const auto& meta = global_costmap_->metadata;
 +        if (global_costmap_->header.frame_id != costmap_client_.getGlobalFrameID() ||
 +            meta.resolution <= 0.0 || meta.size_x == 0 || meta.size_y == 0 ||
@@ -267,37 +272,150 @@ index d72fb18..a66b970 100644
 +                   origin.orientation.x * origin.orientation.y),
 +            1.0 - 2.0 * (origin.orientation.y * origin.orientation.y +
 +                         origin.orientation.z * origin.orientation.z));
-+        const double offsetX = candidateTarget.x - origin.position.x;
-+        const double offsetY = candidateTarget.y - origin.position.y;
-+        const double mapX = (std::cos(yaw) * offsetX + std::sin(yaw) * offsetY) /
-+                            meta.resolution;
-+        const double mapY = (-std::sin(yaw) * offsetX + std::cos(yaw) * offsetY) /
-+                            meta.resolution;
-+        if (mapX < 0.0 || mapY < 0.0 ||
-+            mapX >= meta.size_x || mapY >= meta.size_y) {
-+          ++rejectedBounds;
-+          continue;
++        bool anyInBounds = false;
++        bool foundSafeTarget = false;
++        double safeStandoff = frontier_goal_standoff_;
++        for (double standoff = frontier_goal_standoff_;
++             standoff <= frontier_goal_max_standoff_ + 1e-6 &&
++             distance - standoff >= min_goal_distance_;
++             standoff += 0.05) {
++          const double targetX = point.x - standoff * pointDx / distance;
++          const double targetY = point.y - standoff * pointDy / distance;
++          const double offsetX = targetX - origin.position.x;
++          const double offsetY = targetY - origin.position.y;
++          const double mapX = (std::cos(yaw) * offsetX + std::sin(yaw) * offsetY) /
++                              meta.resolution;
++          const double mapY = (-std::sin(yaw) * offsetX + std::cos(yaw) * offsetY) /
++                              meta.resolution;
++          if (mapX < 0.0 || mapY < 0.0 ||
++              mapX >= meta.size_x || mapY >= meta.size_y) {
++            continue;
++          }
++          anyInBounds = true;
++          const auto index = static_cast<size_t>(mapY) * meta.size_x +
++                             static_cast<size_t>(mapX);
++          if (global_costmap_->data[index] <= frontier_goal_max_cost_) {
++            foundSafeTarget = true;
++            safeStandoff = standoff;
++            break;
++          }
 +        }
-+        const auto index = static_cast<size_t>(mapY) * meta.size_x +
-+                           static_cast<size_t>(mapX);
-+        if (global_costmap_->data[index] > frontier_goal_max_cost_) {
-+          ++rejectedCost;
++        if (!foundSafeTarget) {
++          if (anyInBounds) ++rejectedCost;
++          else ++rejectedBounds;
 +          continue;
 +        }
 +
-+        const double score = std::abs(distance - desired_boundary_distance) - 0.30 * forwardness;
++        const double score = std::abs(distance - desired_boundary_distance)
++                           + 0.25 * (safeStandoff - frontier_goal_standoff_)
++                           - 0.30 * forwardness;
 +        if (score < bestScore) {
 +          bestScore = score;
 +          candidateBoundary = point;
 +          candidateDistance = distance;
++          candidateStandoff = safeStandoff;
 +        }
 +      }
 +      if (std::isfinite(bestScore)) {
 +        frontier = candidate;
 +        boundary_position = candidateBoundary;
 +        distance_to_boundary = candidateDistance;
++        selected_standoff = candidateStandoff;
 +        selectedForwardFrontier = (pass == 0);
 +        break;
++      }
++    }
++  }
++  // A radial offset can still miss safe observation poses beside a frontier.
++  // Search the connected, low-cost portion of the global costmap for a cell
++  // within the standoff band of any frontier boundary point. Connectivity
++  // prevents selecting a free cell on the far side of a wall.
++  if (frontier == frontiers.end() && global_costmap_->header.frame_id ==
++          costmap_client_.getGlobalFrameID()) {
++    const auto& meta = global_costmap_->metadata;
++    const size_t width = meta.size_x, height = meta.size_y;
++    if (meta.resolution > 0.0 && width > 0 && height > 0 &&
++        global_costmap_->data.size() == width * height) {
++      const auto& origin = meta.origin;
++      const double yaw = std::atan2(
++          2.0 * (origin.orientation.w * origin.orientation.z +
++                 origin.orientation.x * origin.orientation.y),
++          1.0 - 2.0 * (origin.orientation.y * origin.orientation.y +
++                       origin.orientation.z * origin.orientation.z));
++      const double cy = std::cos(yaw), sy = std::sin(yaw);
++      const double robotOffsetX = pose.position.x - origin.position.x;
++      const double robotOffsetY = pose.position.y - origin.position.y;
++      const int robotX = static_cast<int>(std::floor(
++          (cy * robotOffsetX + sy * robotOffsetY) / meta.resolution));
++      const int robotY = static_cast<int>(std::floor(
++          (-sy * robotOffsetX + cy * robotOffsetY) / meta.resolution));
++      if (robotX >= 0 && robotY >= 0 &&
++          robotX < static_cast<int>(width) && robotY < static_cast<int>(height)) {
++        const size_t start = static_cast<size_t>(robotY) * width + robotX;
++        if (global_costmap_->data[start] <= frontier_goal_max_cost_) {
++          std::vector<uint8_t> visited(width * height, 0);
++          std::vector<size_t> queue;
++          queue.push_back(start);
++          visited[start] = 1;
++          for (size_t head = 0; head < queue.size(); ++head) {
++            const size_t index = queue[head];
++            const size_t x = index % width, y = index / width;
++            const size_t neighbors[4] = {
++                x > 0 ? index - 1 : index,
++                x + 1 < width ? index + 1 : index,
++                y > 0 ? index - width : index,
++                y + 1 < height ? index + width : index};
++            for (const size_t next : neighbors) {
++              if (!visited[next] &&
++                  global_costmap_->data[next] <= frontier_goal_max_cost_) {
++                visited[next] = 1;
++                queue.push_back(next);
++              }
++            }
++          }
++
++          double bestScore = std::numeric_limits<double>::infinity();
++          for (const size_t index : queue) {
++            const double mapX = (index % width + 0.5) * meta.resolution;
++            const double mapY = (index / width + 0.5) * meta.resolution;
++            geometry_msgs::msg::Point target;
++            target.x = origin.position.x + cy * mapX - sy * mapY;
++            target.y = origin.position.y + sy * mapX + cy * mapY;
++            const double dx = target.x - pose.position.x;
++            const double dy = target.y - pose.position.y;
++            const double travel = std::hypot(dx, dy);
++            if (travel < min_goal_distance_ || travel > 2.0) continue;
++            unsigned int mapCellX, mapCellY;
++            if (!costmap_client_.getCostmap()->worldToMap(
++                    target.x, target.y, mapCellX, mapCellY) ||
++                costmap_client_.getCostmap()->getCost(mapCellX, mapCellY) !=
++                    nav2_costmap_2d::FREE_SPACE) continue;
++            const double forwardness = (dx * forward_x + dy * forward_y) / travel;
++            for (auto candidate = frontiers.begin(); candidate != frontiers.end(); ++candidate) {
++              if (goalOnBlacklist(candidate->centroid)) continue;
++              for (const auto& point : candidate->points) {
++                const double standoff = std::hypot(
++                    target.x - point.x, target.y - point.y);
++                if (standoff < frontier_goal_standoff_ ||
++                    standoff > frontier_goal_max_standoff_) continue;
++                const double score = std::abs(travel - 0.9) +
++                    0.5 * (standoff - frontier_goal_standoff_) -
++                    0.2 * forwardness;
++                if (score < bestScore) {
++                  bestScore = score;
++                  frontier = candidate;
++                  boundary_position = point;
++                  distance_to_boundary = std::hypot(
++                      point.x - pose.position.x, point.y - pose.position.y);
++                  selected_standoff = standoff;
++                  safe_target_position = target;
++                  selectedCostmapGoal = true;
++                  selectedForwardFrontier = forwardness >= 0.25;
++                }
++              }
++            }
++          }
++        }
 +      }
 +    }
 +  }
@@ -308,9 +426,12 @@ index d72fb18..a66b970 100644
 -    status_pub_->publish(status_msg);
 -    stop(true);
 +    RCLCPP_WARN_THROTTLE(logger_, *this->get_clock(), 5000,
-+                         "Frontier rejects: distance=%zu direction=%zu costmap=%zu bounds=%zu cost=%zu, min_boundary=%.2f",
++                         "Frontier rejects: distance=%zu direction=%zu costmap=%zu bounds=%zu cost=%zu, min_boundary=%.2f; first=(%.2f,%.2f) size=%zu",
 +                         rejectedDistance, rejectedDirection, rejectedCostmap, rejectedBounds, rejectedCost,
-+                         minimum_boundary_distance);
++                         minimum_boundary_distance,
++                         frontiers.empty() ? NAN : frontiers.front().centroid.x,
++                         frontiers.empty() ? NAN : frontiers.front().centroid.y,
++                         frontiers.empty() ? 0 : frontiers.front().points.size());
 +    // A fresh map can contain only a nearby free/unknown boundary. Driving
 +    // toward it would violate the normal standoff, but a bounded Nav2 Spin
 +    // can collect new laser viewpoints without commanding translation.
@@ -354,20 +475,26 @@ index d72fb18..a66b970 100644
    }
 -  geometry_msgs::msg::Point target_position = frontier->centroid;
 +
-+  geometry_msgs::msg::Point target_position = boundary_position;
++  geometry_msgs::msg::Point target_position =
++      selectedCostmapGoal ? safe_target_position : boundary_position;
 +  const double dx = target_position.x - pose.position.x;
 +  const double dy = target_position.y - pose.position.y;
-+  target_position.x -= frontier_goal_standoff_ * dx / distance_to_boundary;
-+  target_position.y -= frontier_goal_standoff_ * dy / distance_to_boundary;
++  if (!selectedCostmapGoal) {
++    target_position.x -= selected_standoff * dx / distance_to_boundary;
++    target_position.y -= selected_standoff * dy / distance_to_boundary;
++  }
 +
 +  RCLCPP_DEBUG(logger_,
-+               "Selected safe frontier: boundary=%.2f m, target=%.2f m, standoff=%.2f m, mode=%s",
-+               distance_to_boundary, distance_to_boundary - frontier_goal_standoff_,
-+               frontier_goal_standoff_, selectedForwardFrontier ? "forward" : "reorient");
++               "Selected safe frontier: boundary=%.2f m, target=%.2f m, standoff=%.2f m, mode=%s%s",
++               distance_to_boundary,
++               std::hypot(target_position.x - pose.position.x,
++                          target_position.y - pose.position.y),
++               selected_standoff, selectedForwardFrontier ? "forward" : "reorient",
++               selectedCostmapGoal ? "/connected" : "/radial");
  
    // time out if we are not making any progress
    bool same_goal = same_point(prev_goal_, target_position);
-@@ -302,11 +517,23 @@ void Explore::makePlan()
+@@ -302,11 +643,23 @@ void Explore::makePlan()
    // send goal to move_base if we have something new to pursue
    auto goal = nav2_msgs::action::NavigateToPose::Goal();
    goal.pose.pose.position = target_position;
@@ -392,7 +519,7 @@ index d72fb18..a66b970 100644
    auto send_goal_options = rclcpp_action::Client<
        nav2_msgs::action::NavigateToPose>::SendGoalOptions();
  
-@@ -315,7 +542,9 @@ void Explore::makePlan()
+@@ -315,7 +668,9 @@ void Explore::makePlan()
          if (!goal_handle) {
            RCLCPP_ERROR(logger_, "Goal was REJECTED by the action server");
            goal_active_ = false;
@@ -402,7 +529,7 @@ index d72fb18..a66b970 100644
            active_goal_id_ = goal_handle->get_goal_id();
            RCLCPP_DEBUG(logger_, "Goal ACCEPTED, uuid: %s",
              rclcpp_action::to_string(active_goal_id_).c_str());
-@@ -324,8 +553,8 @@ void Explore::makePlan()
+@@ -324,8 +679,8 @@ void Explore::makePlan()
  
    send_goal_options.result_callback =
        [this,
@@ -413,7 +540,7 @@ index d72fb18..a66b970 100644
        };
    move_base_client_->async_send_goal(goal, send_goal_options);
  }
-@@ -384,6 +613,9 @@ void Explore::reachedGoal(const NavigationGoalHandle::WrappedResult& result,
+@@ -384,6 +739,9 @@ void Explore::reachedGoal(const NavigationGoalHandle::WrappedResult& result,
    switch (result.code) {
      case rclcpp_action::ResultCode::SUCCEEDED:
        RCLCPP_DEBUG(logger_, "Goal was successful");
@@ -423,7 +550,7 @@ index d72fb18..a66b970 100644
        last_progress_ = this->now();
        prev_distance_ = 0;
        break;
-@@ -407,23 +639,22 @@ void Explore::reachedGoal(const NavigationGoalHandle::WrappedResult& result,
+@@ -407,23 +765,22 @@ void Explore::reachedGoal(const NavigationGoalHandle::WrappedResult& result,
        return;
      case rclcpp_action::ResultCode::CANCELED:
        RCLCPP_DEBUG(logger_, "Goal was canceled");
@@ -458,7 +585,7 @@ index d72fb18..a66b970 100644
  }
  
  void Explore::start()
-@@ -439,6 +670,8 @@ void Explore::stop(bool finished_exploring)
+@@ -439,6 +796,8 @@ void Explore::stop(bool finished_exploring)
    RCLCPP_INFO(logger_, "Exploration stopped.");
  
    goal_active_ = false;
@@ -467,7 +594,7 @@ index d72fb18..a66b970 100644
    // Only publish paused status if manually stopped (not finished exploring)
    if (!finished_exploring) {
      auto status_msg = explore_lite_msgs::msg::ExploreStatus();
-@@ -447,6 +680,7 @@ void Explore::stop(bool finished_exploring)
+@@ -447,6 +806,7 @@ void Explore::stop(bool finished_exploring)
    }
  
    move_base_client_->async_cancel_all_goals();

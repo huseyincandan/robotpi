@@ -26,19 +26,13 @@ ULTRASONIC = {
     "LOG_INTERVAL_SECONDS": 1,
     "SLOW_DISTANCE_CM": 90,
     "STOP_DISTANCE_CM": 20,
-    # Ultrasonic is also published as sensor_msgs/Range (/ultrasonic_range) into
-    # Nav2's costmap (see config/nav2_params.yaml range_layer, RangeSensorLayer),
-    # so autonomous
-    # driving already plans/steers around what the ultrasonic sees. This is
-    # only a last-resort failsafe for the true blind gap below the lidar's
-    # minimum range, so it can be tighter than the manual/joystick threshold.
+    # Keep a separate near-field stop for real low obstacles below the LiDAR
+    # plane even when Nav2's filtered RangeLayer is enabled.
     "AUTONOMOUS_STOP_DISTANCE_CM": 12,
-    # Temporarily disabled for autonomous navigation diagnosis: the safety
-    # cluster has repeatedly produced 11.8-11.9 cm echoes while the reported
-    # stable distance was ~96 cm, stopping Nav2 forward commands even with its
-    # Range layer disabled. Manual/joystick ultrasonic protection remains on;
-    # autonomous obstacle handling uses the LIDAR costmap and LIDAR stop gate.
-    "AUTONOMOUS_FORWARD_STOP_ENABLED": False,
+    # Confirmed live low obstacle on 2026-10-14: repeated stable ~9.34 cm
+    # ultrasonic returns while forward LiDAR showed ~230 cm. A close-range
+    # stop must remain active independently of the RangeLayer.
+    "AUTONOMOUS_FORWARD_STOP_ENABLED": True,
     "MIN_FORWARD_SPEED_PERCENT": 12,
     "SAFETY_CHECK_INTERVAL_SECONDS": 0.05,
     "FILTER_WINDOW_SIZE": 7,

@@ -233,12 +233,17 @@ class CmdVelBridge(Node):
         if payload.get("status") != "OK":
             return
 
-        if bool(payload.get("nearest_cluster_confirmed", False)):
-            distance_cm = payload.get("nearest_cluster_distance_cm")
-        elif bool(payload.get("stable", False)):
-            distance_cm = payload.get("distance_cm")
-        else:
+        # A minority near cluster can be a stray echo (previously ~12 cm
+        # against a stable ~96 cm median). Only publish the full-window stable
+        # reading into both Nav2 costmaps; the motor's independent close-range
+        # stop still uses the conservative nearest confirmed cluster.
+        try:
+            confidence = float(payload.get("confidence", 0))
+        except (TypeError, ValueError, OverflowError):
             return
+        if not bool(payload.get("stable", False)) or confidence < 0.7:
+            return
+        distance_cm = payload.get("distance_cm")
 
         if distance_cm is None:
             return

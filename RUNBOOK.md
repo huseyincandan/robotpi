@@ -166,3 +166,128 @@ değil). Test sonu pil 10,904 V, motor komutu sıfır; Nav2 durduruldu.
 Bu, fiziksel BackUp eylemini doğrular. Yeni BT'nin çarpışma sonrası BackUp
 dalına canlı keşifte girildiği ayrıca doğrulanmadı; şarj sonrası kısa keşif
 bu entegrasyon için gereklidir.
+
+## 2026-10-11 genel keşif denemesi
+
+Uygulama `scripts/run_app.py --launch-mode manual` ile açıldı. Robotun önceki
+güne göre konumu değiştiğinden harita `output/maps/pre-general-test-20261011-082939`
+altında arşivlenip `/map/reset` çağrıldı. İlk sıfırlama, Nav2/odometri köprüleri
+henüz kapalıyken `/set_pose` zaman aşımına uğradı ve 20 s içinde harita çıktısı
+vermedi. Nav2 açılınca taze harita 108×60 hücre ve sıfır başlangıç pozu ile
+oluştu. Test kaydı: `logs/nav2-supervised-20261011-083041`.
+
+100 saniyelik gözetimli keşifte 1092 LiDAR taraması, 219 harita iletisi,
+iki plan ve 2183 odometri iletisi kaydedildi. İki Nav2 hedefine ulaşıldı;
+odometri yolu 2,626 m, net yer değiştirme 0,844 m. Bilinen boş harita
+hücreleri 1555→3681, harita 108×60→186×67 oldu (5 cm/hücre). En büyük
+ardışık `map→odom` düzeltmesi 4,1 cm ve 2,86° idi. Motor/sensör hatası,
+çarpışma veya Nav2 kurtarma eylemi kaydedilmedi; bu nedenle yeni BackUp
+dalının otomatik çağrılması bu koşuda test edilemedi.
+
+İkinci hedef sonrasında explore_lite iki frontier bulmaya devam etti, ancak
+36 aday hedefin tamamı global costmap'teki `frontier_goal_max_cost: 100`
+sınırını aştı (`Frontier rejects: distance=0 direction=36 costmap=0
+bounds=0 cost=36`; yön sayacı ilk geçişe ait). Son costmap'te boş maliyet
+2197 hücre, 101-252 arası şişirilmiş maliyet 4374 hücreydi; 1-100 arası
+hücre yoktu. Keşif kalan süreyi `no_safe_frontier` durumunda durarak
+geçirdi. Bu kayıt haritalamanın çalıştığını gösterir, ancak odanın tümünün
+haritalandığını göstermez. Hedef yerleştirme ile maliyet eşiği beraber
+incelenmelidir; sırf ilerlesin diye çarpışma sınırı yükseltilmemelidir.
+
+### Frontier hedefi kök neden incelemesi ve düzeltme
+
+Sabit 40 cm geri çekilme, bir frontier'ın robotla arasındaki doğru üzerindeki
+her hedefi şişirilmiş maliyet bölgesine düşürüyordu. `frontier_goal_max_standoff`
+ile önce aynı doğruda 40–100 cm aralığı taranıyor. Doğrusal arama başarısızsa
+global costmap'te robota düşük maliyetli hücrelerle bağlı olan, frontier'a
+40–100 cm mesafedeki bilinen boş hücreler deneniyor. `frontier_goal_max_cost`
+100 olarak kaldı; bilinmeyen veya yüksek maliyetli hücreye hedef gönderilmiyor.
+Explore fork'unun tekrarlanabilir kaynak farkı
+`patches/m-explore-integrated-20261010.patch` dosyasına işlendi.
+
+İlk canlı denemede doğrusal arama 50 cm geri çekilmiş hedef seçti. Robot
+yaklaşık `(0,24; -0,63)` odometri konumuna giderek `(0,29; -0,60)` hedefinin
+10 cm konum toleransına ulaştı, ancak zorunlu son yön düzeltmesini 39 cm
+önündeki duvar yakınında tamamlayamadığı için Nav2 `Failed to make progress`
+ve BackUp üretti (`logs/nav2-supervised-20261011-084117`). Frontier hedefleri
+gözlem konumları olduğundan Nav2 goal checker
+`nav2_controller::PositionGoalChecker` olarak değiştirildi; canlı ROS parametresi
+bu eklentinin yüklendiğini doğruladı. Bu değişiklik Nav2'nin diğer hedefleri
+için de son yaw koşulunu kaldırır; özel son yön gerektiren ilerideki eylemler
+ayrı bir goal checker veya son dönüş eylemi kullanmalıdır.
+
+İkinci denemede robotun eski konumundan doğrusal arama hedef bulamadı;
+bağlı hücre araması `forward/connected` modunda 1,11 m uzakta güvenli hedef
+buldu. Nav2 hedefe ulaştı ve haritadaki bilinen boş alan 3860→3927 hücreye
+çıktı (`logs/nav2-supervised-20261011-084712`, 547 tarama, 1,43 m odometri
+yolu). Önceki denemede 3681→3863 hücre, 643 tarama ve 2,34 m odometri yolu
+vardı. İkinci hedef sonrasında kalan tek frontier `(-2,21; 0,72)` merkezli,
+17 hücreli; tüm doğrudan hedefler maliyet sınırını aşıyor. Son costmap/map
+kaydında robotun düşük maliyetli bağlı bölgesinden bu frontier'a en yakın
+aday yaklaşık 1,98 m uzakta; 1 m gözlem bandına erişilebilir hücre yok.
+Bu, kalan sınırın mevcut harita/engel/şişirme koşullarında erişilemediğini
+gösterir. Odanın tümünün eksiksiz haritalandığı iddia edilmemeli; dar geçidin
+fiziksel genişliği ve LiDAR'da görünen duvar çizgisi yerinde doğrulanmadan
+maliyet sınırı gevşetilmemeli. Denemeler sonunda explore, Nav2 ve motorlar
+durduruldu.
+
+## 2026-10-14 koridor testi
+
+Robot koridora taşındıktan sonra eski harita `output/maps/pre-corridor-test-20261014-1843/`
+altına arşivlendi ve yeni SLAM haritası başlatıldı. Nav2 ileri yönlü 18 cm
+diferansiyel State Lattice (`config/lattice_primitives_diff_18cm.json`) ve
+`FollowPath.use_rotate_to_heading=true`, `allow_reversing=false` ile çalışıyor.
+İlk karşılaştırmada planlar ileri yönlü olduğu halde denetleyici ters sürüş
+üretiyordu; bu iki ayar düzeltildikten sonra ileri sürüş baskın hale geldi.
+
+İlk uzun denemede robot yaklaşık 2,2 m yer değiştirdi ve harita büyüdü, ancak
+sol LiDAR ~28 cm yakınındaki bir engel ile önde LiDAR'ın görmediği alçak engel
+yakınında kurtarma başarısız oldu (`logs/nav2-supervised-20261014-184837`).
+Kullanıcı alçak engelin gerçek olduğunu doğruladı. Özerk sürüşün ultrasonik
+yakın durdurması daha önce kapatılmıştı; tekrar açıldı ve ~9,34 cm okumada
+Nav2 kaynaklı ileri komutun `BLOCKED/ultrasonic` döndüğü canlı doğrulandı.
+
+Ultrasonik 9,34 cm değerinde hareket sırasında bile değişmeyince gpiozero'nun
+başarısız yankıları smoothing kuyruğunda yok sayıp eski değeri tutabildiği
+yerel kütüphane kodunda görüldü. `FreshDistanceSensor` son geçerli yankının
+zamanını izliyor; 0,5 s içinde yankı yoksa hizmet eski okumayı geçersiz sayıp
+örnek kümesini temizliyor. Kısa kontrollü geri testte enkoderler ~1600 tik
+geriledi; uygulama yeniden başlatılınca ultrasonik ~27 cm ölçtü. Nav2'ye
+yalnızca tüm pencere boyunca kararlı, güveni >=0,7 olan median Range okumaları
+veriliyor; yakın tekil kümeler yalnız bağımsız motor güvenlik kontrolünde
+kalıyor. Yerel ve genel RangeLayer tekrar etkin.
+
+Filtreli RangeLayer ile 25 s gözetimli koşuda 2,69 m odometri yolu, iki
+ulaşılan hedef ve bilinen serbest harita hücresinde 1635→12981 artış görüldü
+(`logs/nav2-supervised-20261014-190443`). 60 s koşuda 5,06 m, 12981→17628
+hücre ve üç başarılı BackUp; arada bir planlama ve ilerleme hatası oldu ama
+keşif başka hedeflere devam etti (`logs/nav2-supervised-20261014-190546`).
+90 s koşuda 7,87 m odometri yolu, 17856→22571 serbest hücre, iki başarılı
+BackUp ve iki başarısız hedef görüldü; robot süre sonuna kadar hareket etti
+(`logs/nav2-supervised-20261014-190744`). Bu sayaçlar haritanın tamamlandığı
+veya her koşulda otonom kaçışın garantilendiği anlamına gelmez. Test sonunda
+explore, Nav2 ve motorlar durduruldu; pil ~11,78 V idi.
+
+Ek doğrulama: 45 s yakın mesafe denemesinde gözetim betiğinin sabit 32 cm
+ön eşiği, Nav2'nin geri/dönüş kurtarmasını erken kesiyordu. Betik artık bu
+eşiği yalnız gerçekten ileri sürerken uygular; her yönde 18 cm mutlak sınır
+ve 12 cm kararlı ultrasonik alçak-engel sınırı korunur. Bu durumda robot
+güvenli şekilde dönüp 5,14 m yol aldı; harita 24455→25581 serbest hücreye
+çıktı (`logs/nav2-supervised-20261014-193309`).
+
+120 s denemede 8,57 m yol alınmasına karşın harita yalnız 25582→25973
+serbest hücre büyüdü (`logs/nav2-supervised-20261014-193447`). Motorun
+`motion_stall` engeli, kısa geri kaçıştan sonra ileri komutları uzun süre
+reddedebiliyordu: önceki yönü açmak için 6 cm öteleme şarttı. Bağımsız
+gövde pozu 0,35 rad dönerse veya LiDAR'ın en az iki sektörü anlamlı değişirse
+eski yön engeli de artık kaldırılır (`services/motion_progress.py`). Bu,
+fiziksel olarak dönmeyen teker hareketinin kilidi kaldırmasına izin vermez.
+Uygulama bu kodla yeniden başlatıldı. Sonraki 60 s koşuda 4,96 m yol,
+2534→16276 serbest hücre, bir hedef başarısı ve güvenli geri kurtarma görüldü;
+sonda `motion_stall_blocked_direction=null`, motorlar ve Nav2 duruyordu
+(`logs/nav2-supervised-20261014-193751`). Bir başka hedef, gerçek yerel
+maliyet haritasında ayak izi yakınında 0,22 m'de öldürücü engel varken RPP
+çarpışma öngörüsüyle reddedildi; explorer alternatif hedef seçti. Bu son
+hedef hatası serbest yol varmış gibi davranılarak giderilmemeli. IMU bir
+`impact` durdurması kaydetti; fiziksel temas olup olmadığı doğrulanmadı.
+Koridorun/evin tüm haritasının tamamlandığı henüz doğrulanmadı.

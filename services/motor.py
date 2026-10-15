@@ -2,16 +2,20 @@ import asyncio
 import errno
 import math
 import glob
+import json
 import termios
 import threading
 import time
+from pathlib import Path
 
 import serial
 
 from config import IMU
+from config import MAP
 from config import MOTOR
 from config import MOTOR_SERIAL
 from config import ULTRASONIC
+from services.motion_progress import MotionProgressGuard
 
 
 class MotorSerialError(RuntimeError):
@@ -39,6 +43,10 @@ class MotorService:
         self.last_distance_error = None
         self.last_requested_x = 0
         self.last_requested_y = 0
+        self.motion_progress = MotionProgressGuard()
+        self._pose_file = Path(MAP.get("DIR", "output/maps")) / MAP.get(
+            "ROS2_EXPORT_POSE_FILE", "live_pose.json"
+        )
 
         self._serial_lock = threading.Lock()
         self._serial = None
@@ -357,6 +365,37 @@ class MotorService:
 
         return self._recovery_backup_clear(x=x)
 
+    def _fresh_map_pose(self):
+        try:
+            pose = json.loads(self._pose_file.read_text(encoding="utf-8"))
+            if not 0 <= time.time() - float(pose["updated_at"]) <= 2.5:
+                return None
+            return (float(pose["x"]), float(pose["y"]), float(pose["yaw_rad"]))
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
+
+    def _motion_observation(self):
+        # Keep the same measurement source through an escape attempt. A
+        # scan-detected stall cannot be released by a newly fresh map pose
+        # without a pose baseline from the moment of contact.
+        pose = (None if self.motion_progress.blocked_kind == "scan"
+                else self._fresh_map_pose())
+        if pose is not None:
+            return pose, "pose"
+        if not self.lidar:
+            return None, "scan"
+        try:
+            distances = self.lidar.get_distances_cm()
+            values = tuple(
+                None if distances.get(name) is None else float(distances[name]) / 100.0
+                for name in ("front_cm", "back_cm", "left_cm", "right_cm")
+            )
+            if sum(value is not None for value in values) < 2:
+                return None, "scan"
+            return values, "scan"
+        except (OSError, ValueError, TypeError, KeyError):
+            return None, "scan"
+
     def _stop_motor(self):
 
         self._last_drive_command = None
@@ -404,6 +443,12 @@ class MotorService:
 
         if source is not None:
             self.last_drive_source = str(source).strip().lower()
+
+        if self.motion_progress.blocked(x, y):
+            self._stop_motor()
+            self.blocked = True
+            self.last_block_reason = "motion_stall"
+            return False
 
         if self.sensor_fault and (abs(float(x)) > 1e-3 or abs(float(y)) > 1e-3):
             self._stop_motor()
@@ -607,7 +652,9 @@ class MotorService:
 
         print(
             "IMU STUCK:",
+            "time=", round(time.time(), 3),
             ",".join(event["reasons"]),
+            "command=", event["command"],
             "accel=",
             round(event["sample"]["accel_x"], 2),
             round(event["sample"]["accel_y"], 2),
@@ -639,6 +686,10 @@ class MotorService:
 
     def stop_for_imu_stuck(self):
 
+        observation, kind = self._motion_observation()
+        self.motion_progress.block(
+            self.current_x, self.current_y, observation, kind
+        )
         self.stop()
         self.blocked = True
         self.last_block_reason = "imu"
@@ -673,14 +724,24 @@ class MotorService:
 
             if driving_forward:
                 # Keep the command's source semantics when refreshing it for
-                # the continuous forward safety check. Nav2 commands bypass
-                # manual ultrasonic slowdown; its costmap handles obstacle
-                # avoidance while the close-range watchdog remains active.
+                # the continuous forward safety check. The independent
+                # close-range stop protects Nav2 between incoming commands.
+                # Only manual control uses the proportional slowdown.
                 source = self.last_drive_source
+                autonomous = source in {"nav2", "explore", "ros2"}
+                ultrasonic_stop = (
+                    not autonomous
+                    or ULTRASONIC.get("AUTONOMOUS_FORWARD_STOP_ENABLED", True)
+                )
                 self.drive(
                     self.last_requested_x,
                     self.last_requested_y,
-                    use_forward_safety=source not in {"nav2", "explore", "ros2"},
+                    use_forward_safety=ultrasonic_stop,
+                    use_slowdown=not autonomous,
+                    stop_distance_cm=(
+                        ULTRASONIC.get("AUTONOMOUS_STOP_DISTANCE_CM", 12)
+                        if autonomous else None
+                    ),
                     source=source
                 )
 
@@ -718,6 +779,29 @@ class MotorService:
 
                     if backward_stuck_event:
                         self.stop_for_imu_stuck()
+
+            elif abs(float(self.current_x)) >= 0.5:
+                # Turning in place can sweep a bumper into a low obstacle.
+                # The IMU mixin accepts x-only motion, so sample it here too.
+                turning_stuck_event = await asyncio.to_thread(
+                    self.read_imu_stuck_event
+                )
+                if turning_stuck_event:
+                    self.stop_for_imu_stuck()
+
+            if abs(float(self.current_x)) >= 0.5 or abs(float(self.current_y)) >= 0.5:
+                observation, kind = self._motion_observation()
+                if self.motion_progress.update(
+                    self.current_x, self.current_y, observation,
+                    time.monotonic(), kind=kind
+                ):
+                    stalled_mode = self.motion_progress.blocked_mode
+                    self._stop_motor()
+                    self.blocked = True
+                    self.last_block_reason = "motion_stall"
+                    print("MOTION STALL SAFETY STOP:", stalled_mode, flush=True)
+            else:
+                self.motion_progress.update(0, 0, None, time.monotonic())
 
             await asyncio.sleep(
                 ULTRASONIC["SAFETY_CHECK_INTERVAL_SECONDS"]

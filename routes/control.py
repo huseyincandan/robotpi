@@ -127,10 +127,9 @@ def register_control_routes(
         # cannot see an obstacle directly against the bumper. Ultrasonic is the
         # only sensor covering that range, so this check must run for every
         # drive source (including nav2/explore_lite) and can never be bypassed.
-        # Ultrasonic readings are also published as a LaserScan into Nav2's
-        # costmap (config/nav2_params.yaml ultrasonic_layer), so autonomous
-        # sources already plan around what this sensor sees; callers may pass
-        # a tighter stop_distance_cm to use this only as a last-resort check.
+        # Fresh, stable ultrasonic readings are published as Range data into
+        # Nav2's costmaps. This independent gate protects the blind gap even
+        # when a reading is not accepted into the costmap.
         threshold_cm = (
             float(stop_distance_cm)
             if stop_distance_cm is not None
@@ -405,7 +404,7 @@ def register_control_routes(
         if not moved:
             return {
                 "status": "BLOCKED",
-                "reason": "obstacle",
+                "reason": motor.last_block_reason or "obstacle",
                 "distance": motor.last_obstacle_distance
             }
 
@@ -459,6 +458,9 @@ def register_control_routes(
             "last_power_fault": getattr(motor, "last_power_fault", None),
             "sensor_fault": bool(getattr(motor, "sensor_fault", False)),
             "last_sensor_fault": getattr(motor, "last_sensor_fault", None),
+            "motion_stall_blocked_direction": getattr(
+                getattr(motor, "motion_progress", None), "blocked_mode", None
+            ),
         }
 
     @router.get("/ultrasonic/readings")

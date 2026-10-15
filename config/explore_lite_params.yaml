@@ -21,14 +21,22 @@
     # avoids the high-cost inflated targets observed at 237, which made DWB
     # prefer backing/tiny turns over forward progress.
     frontier_goal_standoff: 0.40
-    frontier_goal_max_cost: 100
+    # Search farther back from a frontier in 5 cm steps when the fixed 40 cm
+    # target falls inside a wall's inflated cost band. Keep the same max-cost
+    # safety gate and at least min_goal_distance of travel from the robot.
+    frontier_goal_max_standoff: 1.00
+    # The global inflation band ends near cost 120 at 0.32 m from obstacles.
+    # Cost 100 admitted only zero-cost cells and disconnected the last room
+    # frontier; 120 opens a connected observation cell while Nav2 still checks
+    # the full footprint and rejects lethal/inscribed obstacle cells.
+    frontier_goal_max_cost: 120
     # Was 45.0, matching nav2 controller_server's own movement_time_allowance
     # (also 45.0). That made the two timeouts a race: explore_lite's own
     # progress watchdog fired within ~1s of nav2's "Failed to make progress",
     # and explore_lite immediately cancels+resends a new goal on any abort -
     # confirmed live via nav2 log: 0 "Running backup"/"Running spin" lines
     # despite repeated stalls, because explore_lite tore down the goal before
-    # nav2's BT recovery could run. Keep this well above Nav2's 15s progress
+    # nav2's BT recovery could run. Keep this well above Nav2's progress
     # checker so the bounded BackUp-or-Spin attempt can complete before
     # explore_lite gives up on a frontier.
     progress_timeout: 120.0

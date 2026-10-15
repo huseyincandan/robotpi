@@ -6,17 +6,21 @@ from services.distance import DistanceService, valid_distance_cm
 
 
 class FakeSensor:
-    def __init__(self, distance_m):
+    def __init__(self, distance_m, fresh=True):
         self.distance_m = distance_m
+        self.fresh = fresh
+
+    def is_fresh(self):
+        return self.fresh
 
     @property
     def distance(self):
         return self.distance_m
 
 
-def make_service(distance_m):
+def make_service(distance_m, fresh=True):
     service = DistanceService.__new__(DistanceService)
-    service.sensor = FakeSensor(distance_m)
+    service.sensor = FakeSensor(distance_m, fresh=fresh)
     service._samples = deque([90.0, 90.1, 89.9], maxlen=7)
     service._samples_lock = threading.Lock()
     return service
@@ -42,6 +46,12 @@ class DistanceValidationTests(unittest.TestCase):
         self.assertFalse(observation["stable"])
         self.assertEqual(observation["sample_count"], 0)
         self.assertFalse(observation["nearest_cluster_confirmed"])
+
+    def test_stale_smoothed_echo_clears_old_cluster(self):
+        service = make_service(0.0934, fresh=False)
+        self.assertIsNone(service.read_safety_centimeters())
+        self.assertEqual(list(service._samples), [])
+        self.assertFalse(service.read_observation()["stable"])
 
 
 if __name__ == "__main__":

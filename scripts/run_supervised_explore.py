@@ -21,6 +21,9 @@ TOPICS = [
     "/scan", "/map", "/plan", "/received_global_plan", "/cmd_vel_nav",
     "/cmd_vel_smoothed", "/cmd_vel", "/odom", "/odom_raw", "/tf", "/tf_static",
     "/global_costmap/costmap_raw", "/local_costmap/costmap_raw",
+    "/local_costmap/costmap_raw_updates",
+    "/local_costmap/published_footprint", "/collision_monitor_state",
+    "/ultrasonic_range", "/imu/data", "/evaluation",
 ]
 
 
@@ -36,6 +39,7 @@ def snapshot():
         "nav": request("/nav2/status"),
         "motor": request("/motor/status"),
         "lidar": request("/lidar/readings"),
+        "ultrasonic": request("/ultrasonic/readings"),
         "battery": request("/battery/status"),
     }
 
@@ -49,8 +53,17 @@ def unsafe(state, front_abort_cm, min_clearance_cm):
     distances = [lidar.get(key) for key in ("front_cm", "left_cm", "back_cm", "right_cm")]
     if any(value is None or value < min_clearance_cm for value in distances):
         return "clearance_under_limit"
-    if lidar["front_cm"] < front_abort_cm:
+    # A close front return is expected while Nav2 backs away or rotates.
+    # Abort at the normal front limit only while actually driving forward;
+    # keep a tighter unconditional limit for any direction of motion.
+    if lidar["front_cm"] < front_abort_cm and motor.get("current_y", 0) > 0:
         return "front_clearance"
+    ultrasonic = state.get("ultrasonic", {})
+    if (ultrasonic.get("status") == "OK" and ultrasonic.get("stable")
+            and ultrasonic.get("nearest_cluster_confirmed")
+            and ultrasonic.get("distance_cm") is not None
+            and ultrasonic["distance_cm"] <= 12):
+        return "low_front_obstacle"
     return None
 
 
@@ -58,7 +71,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration", type=float, default=25.0)
     parser.add_argument("--front-abort-cm", type=float, default=32.0)
-    parser.add_argument("--min-clearance-cm", type=float, default=25.0)
+    parser.add_argument("--min-clearance-cm", type=float, default=18.0)
     args = parser.parse_args()
     if not 0 < args.duration <= 120:
         parser.error("--duration must be 0..120 seconds")
@@ -98,7 +111,9 @@ def main():
                     "time": round(time.monotonic(), 1),
                     "explore": state["nav"].get("explore_reason"),
                     "motor": [state["motor"].get("current_x"), state["motor"].get("current_y")],
+                    "motion_stall": state["motor"].get("motion_stall_blocked_direction"),
                     "lidar": state["lidar"],
+                    "ultrasonic_cm": state["ultrasonic"].get("distance_cm"),
                     "voltage": state["battery"].get("bus_voltage"),
                 }), flush=True)
                 reason = unsafe(state, args.front_abort_cm, args.min_clearance_cm)

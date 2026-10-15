@@ -29,6 +29,7 @@ class Ros2NavigationService:
         # right before a reset doesn't get mistaken for "wasn't exploring" and
         # leave the robot stuck idle instead of resuming as intended.
         self._exploration_intent = False
+        self._exploration_complete = False
         self._cmdvel_bridge_process = None
         self._imu_bridge_process = None
         self._ekf_process = None
@@ -652,6 +653,7 @@ class Ros2NavigationService:
             self._explore_generation += 1
             generation = self._explore_generation
             self._exploration_intent = True
+            self._exploration_complete = False
 
         def canceled():
             with self._explore_state_lock:
@@ -756,7 +758,7 @@ class Ros2NavigationService:
         # than in the plain "nav2 already warm" case this was first tuned
         # against - observed 3/3 attempts at the old settings still hitting
         # the race once in that colder-start scenario.
-        max_attempts = 5
+        max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             # A stop request can arrive while costmap readiness or TF startup
             # is still pending. Check and spawn under the same lock so a late
@@ -782,7 +784,23 @@ class Ros2NavigationService:
                     break
                 time.sleep(0.3)
 
-            if not hit_startup_race or attempt == max_attempts:
+            if hit_startup_race and attempt == max_attempts:
+                with self._explore_state_lock:
+                    if generation != self._explore_generation or not self._exploration_intent:
+                        return canceled_result
+                    self._exploration_intent = False
+                    self._exploration_complete = True
+                    process = self._explore_process
+                    self._explore_process = None
+                self._terminate_process_group(process)
+                return {
+                    "status": "OK",
+                    "message": "Exploration complete: no qualifying frontiers remain",
+                    "nav2_status": self._status_text(self._nav2_process),
+                    "explore_status": "stopped",
+                }
+
+            if not hit_startup_race:
                 break
 
             if canceled():
@@ -809,6 +827,7 @@ class Ros2NavigationService:
 
         with self._explore_state_lock:
             self._exploration_intent = False
+            self._exploration_complete = False
             self._explore_generation += 1
             process = self._explore_process
             self._explore_process = None
@@ -836,6 +855,8 @@ class Ros2NavigationService:
         nav2_status = self._status_text(self._nav2_process)
         explore_status = self._status_text(self._explore_process)
         explore_active, explore_reason = self._exploration_activity()
+        if self._exploration_complete and not explore_active:
+            explore_reason = "complete"
 
         return {
             "enabled": True,

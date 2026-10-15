@@ -10,19 +10,17 @@
      explore_lite submits a replacement goal. This tree performs its bounded
      recovery directly after a controller failure, then returns a second
      failure to explore_lite. This bounds recovery to one attempt per goal.
-  3) 2026-09-13: added a SmoothPath step (nav2_smoother/SimpleSmoother, see
-     nav2_params.yaml) right after ComputePathToPose - the raw NavFn grid path
-     was being passed straight to FollowPath, and PathAlign closely tracking
-     its 0.05m-cell stairsteps down a corridor looked like excessive
-     side-to-side reorientation instead of a direct run.
+  3) State Lattice generates footprint-checked SE(2) paths. Do not run the
+     generic SimpleSmoother after it: that can shift a feasible curve into a
+     wall or erase the orientation cues needed for reverse segments.
   4) A PipelineSequence re-ticks its planner branch while FollowPath is
      running.  The RateController only reduced that re-plan rate: every tick
      still overwrote {path}, which Nav2 treats as a new FollowPath action and
      visibly aborts/stops the current controller action.  A normal Sequence
-     plans and smooths once per navigation goal, then lets FollowPath run
+     plans once per navigation goal, then lets FollowPath run
      continuously.  Global replanning now occurs after a controller/planner
      failure and its recovery, or when explore_lite submits a new frontier.
-     The local costmap and DWB controller remain active at their normal rate,
+     The local costmap and RPP controller remain active at their normal rate,
      so obstacle avoidance is not delayed.
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
@@ -36,7 +34,6 @@
         <RecoveryNode number_of_retries="1" name="ComputePathToPose">
           <Sequence>
             <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
-            <SmoothPath unsmoothed_path="{path}" smoothed_path="{path}" smoother_id="SimpleSmoother"/>
           </Sequence>
           <Sequence>
             <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>

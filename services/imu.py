@@ -127,12 +127,9 @@ class _ImuMotionMixin:
 
     def detect_stuck(self, x, y):
 
-        # Impact/tilt/gyro detection itself is direction-agnostic (it only
-        # reads real IMU motion vs thresholds) - only skip when truly
-        # stationary (y==0). Previously gated on y<=0 (forward-only), which
-        # meant an impact while backing up (e.g. a low table leg behind the
-        # robot) was never detected at all, no matter how hard it hit.
-        if not IMU["ENABLED"] or y == 0:
+        # A pure turn can also strike a low obstacle with the robot's corner.
+        # Reset the sample only when *both* commanded axes are stationary.
+        if not IMU["ENABLED"] or (x == 0 and y == 0):
             self.last_sample = None
             self._driving_since = None
             return None

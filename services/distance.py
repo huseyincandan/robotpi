@@ -4,6 +4,7 @@ import math
 import os
 import statistics
 import threading
+import time
 
 from gpiozero import Device
 import gpiozero.pins.lgpio as lgpio_pins
@@ -20,6 +21,27 @@ Device.pin_factory = LGPIOFactory()
 from gpiozero import DistanceSensor
 
 from config import ULTRASONIC
+
+
+class FreshDistanceSensor(DistanceSensor):
+    """Expose whether gpiozero's smoothed value has a recent real echo."""
+
+    def __init__(self, *args, **kwargs):
+        self._fresh_lock = threading.Lock()
+        self._last_valid_echo = None
+        super().__init__(*args, **kwargs)
+
+    def _read(self):
+        value = super()._read()
+        if value is not None:
+            with self._fresh_lock:
+                self._last_valid_echo = time.monotonic()
+        return value
+
+    def is_fresh(self, max_age_seconds=0.5):
+        with self._fresh_lock:
+            last = self._last_valid_echo
+        return last is not None and time.monotonic() - last <= max_age_seconds
 
 
 def valid_distance_cm(value, max_distance_m, min_distance_cm=2.0):
@@ -65,7 +87,7 @@ class DistanceService:
 
     def __init__(self):
 
-        self.sensor = DistanceSensor(
+        self.sensor = FreshDistanceSensor(
             echo=ULTRASONIC["ECHO_PIN"],
             trigger=ULTRASONIC["TRIGGER_PIN"],
             max_distance=ULTRASONIC["MAX_DISTANCE_METERS"]
@@ -76,7 +98,13 @@ class DistanceService:
     def read_centimeters(self):
 
         try:
-            centimeters = float(self.sensor.distance) * 100.0
+            # gpiozero ignores None readings in its smoothing queue. Without
+            # this check, a disconnected/no-echo sensor can report its last
+            # valid distance indefinitely as a stable live obstacle.
+            if hasattr(self.sensor, "is_fresh") and not self.sensor.is_fresh():
+                centimeters = float("nan")
+            else:
+                centimeters = float(self.sensor.distance) * 100.0
         except Exception:
             centimeters = float("nan")
 
