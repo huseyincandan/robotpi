@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import shlex
@@ -19,6 +20,8 @@ class Ros2NavigationService:
         self._nav2_process = None
         self._explore_process = None
         self._explore_state_lock = threading.Lock()
+        self._explore_start_lock = threading.Lock()
+        self._explore_retry_since = None
         self._explore_generation = 0
         # True whenever the caller last asked for autonomous exploration to be
         # running (set in start_exploration(), cleared in stop_exploration()),
@@ -29,7 +32,7 @@ class Ros2NavigationService:
         # right before a reset doesn't get mistaken for "wasn't exploring" and
         # leave the robot stuck idle instead of resuming as intended.
         self._exploration_intent = False
-        self._exploration_complete = False
+        self._exploration_waiting = False
         self._cmdvel_bridge_process = None
         self._imu_bridge_process = None
         self._ekf_process = None
@@ -641,7 +644,11 @@ class Ros2NavigationService:
             "message": "Navigation2 stopped"
         }
 
-    def start_exploration(self):
+    def start_exploration(self, *, expected_generation=None):
+        with self._explore_start_lock:
+            return self._start_exploration(expected_generation)
+
+    def _start_exploration(self, expected_generation):
 
         if not self.enabled:
             return {
@@ -650,10 +657,15 @@ class Ros2NavigationService:
             }
 
         with self._explore_state_lock:
-            self._explore_generation += 1
+            if expected_generation is not None:
+                if (expected_generation != self._explore_generation
+                        or not self._exploration_intent):
+                    return {"status": "CANCELED", "message": "Exploration retry canceled"}
+            else:
+                self._explore_generation += 1
             generation = self._explore_generation
             self._exploration_intent = True
-            self._exploration_complete = False
+            self._exploration_waiting = False
 
         def canceled():
             with self._explore_state_lock:
@@ -788,14 +800,13 @@ class Ros2NavigationService:
                 with self._explore_state_lock:
                     if generation != self._explore_generation or not self._exploration_intent:
                         return canceled_result
-                    self._exploration_intent = False
-                    self._exploration_complete = True
+                    self._exploration_waiting = True
                     process = self._explore_process
                     self._explore_process = None
                 self._terminate_process_group(process)
                 return {
                     "status": "OK",
-                    "message": "Exploration complete: no qualifying frontiers remain",
+                    "message": "Exploration waiting: no qualifying frontiers; automatic retry remains enabled",
                     "nav2_status": self._status_text(self._nav2_process),
                     "explore_status": "stopped",
                 }
@@ -827,7 +838,8 @@ class Ros2NavigationService:
 
         with self._explore_state_lock:
             self._exploration_intent = False
-            self._exploration_complete = False
+            self._exploration_waiting = False
+            self._explore_retry_since = None
             self._explore_generation += 1
             process = self._explore_process
             self._explore_process = None
@@ -837,6 +849,56 @@ class Ros2NavigationService:
             "status": "OK",
             "message": "explore_lite stopped"
         }
+
+    def maintain_exploration(self):
+        """Retry idle/dead exploration without overriding an intervening stop."""
+        with self._explore_state_lock:
+            if not self._exploration_intent:
+                self._explore_retry_since = None
+                return
+            generation = self._explore_generation
+
+        active, reason = self._exploration_activity()
+        if active:
+            self._explore_retry_since = None
+            return
+        now = time.monotonic()
+        if self._explore_retry_since is None:
+            self._explore_retry_since = now
+            return
+        # Allow startup and recovery to finish. Retry an exited process sooner;
+        # a blocked frontier gets a cooling-off interval before blacklist reset.
+        delay = 10.0 if reason == "process_stopped" else 30.0
+        if now - self._explore_retry_since < delay:
+            return
+        if not self._explore_start_lock.acquire(blocking=False):
+            return
+        try:
+            with self._explore_state_lock:
+                if generation != self._explore_generation or not self._exploration_intent:
+                    return
+                process = self._explore_process
+                self._explore_process = None
+            self._terminate_process_group(process)
+            print("EXPLORATION RETRY:", reason, flush=True)
+            result = self._start_exploration(generation)
+            print("EXPLORATION RETRY RESULT:", result, flush=True)
+        finally:
+            self._explore_retry_since = time.monotonic()
+            self._explore_start_lock.release()
+
+    async def supervise_exploration(self, motor, lidar):
+        while True:
+            await asyncio.sleep(1)
+            if not self._exploration_intent:
+                continue
+            try:
+                # Never restart motion around a latched safety fault or missing scan.
+                if motor.power_fault or motor.sensor_fault or not lidar.is_ready():
+                    continue
+                await asyncio.to_thread(self.maintain_exploration)
+            except Exception as exc:
+                print("EXPLORATION SUPERVISOR ERROR:", repr(exc), flush=True)
 
     def status(self):
 
@@ -855,8 +917,8 @@ class Ros2NavigationService:
         nav2_status = self._status_text(self._nav2_process)
         explore_status = self._status_text(self._explore_process)
         explore_active, explore_reason = self._exploration_activity()
-        if self._exploration_complete and not explore_active:
-            explore_reason = "complete"
+        if self._exploration_waiting and not explore_active:
+            explore_reason = "waiting_for_frontiers"
 
         return {
             "enabled": True,
@@ -866,7 +928,7 @@ class Ros2NavigationService:
             "imu_bridge_status": self._status_text(self._imu_bridge_process),
             "ekf_status": self._status_text(self._ekf_process),
             "nav2_running": nav2_status == "running",
-            "explore_running": explore_status == "running" and explore_active,
+            "explore_running": self._exploration_intent,
             "explore_process_running": explore_status == "running",
             "explore_active": explore_active,
             "explore_reason": explore_reason,

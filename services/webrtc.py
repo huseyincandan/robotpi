@@ -1,4 +1,5 @@
 import asyncio
+import site
 import cv2
 import av
 from fractions import Fraction
@@ -55,6 +56,8 @@ async def close_existing_sessions():
             peer
         )
 
+    await asyncio.to_thread(close_camera)
+
 #################################################
 # KAMERA
 #################################################
@@ -68,62 +71,53 @@ def get_camera():
     if camera is not None:
         return camera
 
-    device = cv2.VideoCapture(
-        0,
-        cv2.CAP_V4L2
-    )
+    # libcamera's native bindings are supplied by Raspberry Pi OS, not PyPI.
+    site.addsitedir("/usr/lib/python3/dist-packages")
+    from picamera2 import Picamera2
 
-    if not device.isOpened():
-        print(
-            "CAMERA NOT AVAILABLE"
+    device = Picamera2()
+    try:
+        device.configure(
+            device.create_video_configuration(
+                main={
+                    "size": (CAMERA["WIDTH"], CAMERA["HEIGHT"]),
+                    # Picamera2 RGB888 arrays have BGR byte order for OpenCV.
+                    "format": "RGB888"
+                },
+                controls={"FrameRate": CAMERA["FPS"]},
+                buffer_count=2,
+                queue=False
+            )
         )
-
-        device.release()
-
-        return None
-
-    fourcc = CAMERA.get(
-        "FOURCC"
-    )
-
-    if fourcc:
-        device.set(
-            cv2.CAP_PROP_FOURCC,
-            cv2.VideoWriter_fourcc(*fourcc)
-        )
-
-    device.set(
-        cv2.CAP_PROP_FRAME_WIDTH,
-        CAMERA["WIDTH"]
-    )
-
-    device.set(
-        cv2.CAP_PROP_FRAME_HEIGHT,
-        CAMERA["HEIGHT"]
-    )
-
-    device.set(
-        cv2.CAP_PROP_FPS,
-        CAMERA["FPS"]
-    )
-
-    device.set(
-        cv2.CAP_PROP_BUFFERSIZE,
-        CAMERA["BUFFER_SIZE"]
-    )
+        device.start()
+    except Exception:
+        device.close()
+        raise
 
     camera = device
 
     print(
-        "CAMERA OPEN:",
-        camera.isOpened(),
-        int(camera.get(cv2.CAP_PROP_FRAME_WIDTH)),
-        int(camera.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-        int(camera.get(cv2.CAP_PROP_FPS)),
-        fourcc
+        "PI CAMERA OPEN:",
+        CAMERA["WIDTH"],
+        CAMERA["HEIGHT"],
+        CAMERA["FPS"],
+        "rotation CCW:",
+        CAMERA["ROTATION_CCW_DEGREES"]
     )
 
     return camera
+
+
+def close_camera():
+    global camera
+
+    device = camera
+    camera = None
+    if device is not None:
+        try:
+            device.stop()
+        finally:
+            device.close()
 
 #################################################
 # VIDEO TRACK
@@ -139,27 +133,43 @@ class CameraTrack(VideoStreamTrack):
 
         self.camera = camera
         self.frame_count = 0
+        self.first_sensor_timestamp = None
+        rotation = CAMERA["ROTATION_CCW_DEGREES"]
+        rotations = {
+            0: None,
+            90: cv2.ROTATE_90_COUNTERCLOCKWISE,
+            180: cv2.ROTATE_180,
+            270: cv2.ROTATE_90_CLOCKWISE
+        }
+        if rotation not in rotations:
+            raise ValueError("CAMERA.ROTATION_CCW_DEGREES must be 0, 90, 180 or 270")
+        self.rotation = rotations[rotation]
+
+    def capture_frame(self):
+        with self.camera.captured_request() as request:
+            return (
+                request.make_array("main"),
+                request.get_metadata()["SensorTimestamp"]
+            )
 
     async def recv(self):
+        if self.readyState != "live":
+            raise MediaStreamError
 
-        pts, time_base = (
-            await self.next_timestamp()
-        )
+        try:
+            frame, sensor_timestamp = await asyncio.to_thread(self.capture_frame)
+        except RuntimeError as exc:
+            print("PI CAMERA READ FAILED:", exc, flush=True)
+            self.stop()
+            raise MediaStreamError from exc
 
-        success, frame = (
-            self.camera.read()
-        )
+        if self.rotation is not None:
+            frame = cv2.rotate(frame, self.rotation)
 
-        if not success:
-            print(
-                "CAMERA READ FAILED"
-            )
+        if self.first_sensor_timestamp is None:
+            self.first_sensor_timestamp = sensor_timestamp
 
-            await asyncio.sleep(
-                0.05
-            )
-
-            return await self.recv()
+        pts = (sensor_timestamp - self.first_sensor_timestamp) * 90000 // 1_000_000_000
 
         self.frame_count += 1
 
@@ -172,7 +182,7 @@ class CameraTrack(VideoStreamTrack):
 
         video_frame.pts = pts
         video_frame.time_base = (
-            time_base
+            Fraction(1, 90000)
         )
 
         return video_frame
@@ -340,6 +350,8 @@ async def create_answer(
 
     await close_existing_sessions()
 
+    camera_device = await asyncio.to_thread(get_camera)
+
     pc = RTCPeerConnection()
     microphone = None
     closed = False
@@ -369,6 +381,9 @@ async def create_answer(
         pcs.discard(
             pc
         )
+
+        if not pcs:
+            await asyncio.to_thread(close_camera)
 
         print(
             "Peer count:",
@@ -437,19 +452,13 @@ async def create_answer(
     # VIDEO
     #################################################
 
-    camera_device = get_camera()
-
-    if camera_device:
-        pc.addTrack(
-            CameraTrack(
-                camera_device
-            )
+    pc.addTrack(
+        CameraTrack(
+            camera_device
         )
+    )
 
-        print("VIDEO TRACK ADDED")
-
-    else:
-        print("VIDEO TRACK SKIPPED")
+    print("VIDEO TRACK ADDED")
 
     if AUDIO.get("ENABLED", True):
         try:

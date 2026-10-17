@@ -193,7 +193,9 @@ local_costmap:
         no_readings_timeout: 0.0
         clear_threshold: 0.2
         mark_threshold: 0.8
-        clear_on_max_reading: true
+        # A confirmed return at the 20 cm trust limit is still an obstacle.
+        # Untrusted distant echoes must never clear near-field obstacles.
+        clear_on_max_reading: false
         input_sensor_type: "ALL"
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
@@ -242,7 +244,7 @@ global_costmap:
         no_readings_timeout: 0.0
         clear_threshold: 0.2
         mark_threshold: 0.8
-        clear_on_max_reading: true
+        clear_on_max_reading: false
         input_sensor_type: "ALL"
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"

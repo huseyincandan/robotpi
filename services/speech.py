@@ -353,6 +353,8 @@ class SpeechService:
 		if not AUDIO.get("ENABLED", True):
 			return
 
+		print("SPEECH:", self._spoken_text(text), flush=True)
+
 		with self._audio_lock:
 			self._begin_audio()
 

@@ -12,6 +12,7 @@ class ExploreStartStopRaceTests(unittest.TestCase):
         navigator = Ros2NavigationService.__new__(Ros2NavigationService)
         navigator.enabled = True
         navigator._explore_state_lock = threading.Lock()
+        navigator._explore_start_lock = threading.Lock()
         navigator._explore_generation = 0
         navigator._exploration_intent = False
         navigator._explore_process = None

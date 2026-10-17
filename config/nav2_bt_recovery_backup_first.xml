@@ -46,6 +46,10 @@
         <Fallback>
           <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
           <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+          <!-- START_OCCUPIED (ComputePathToPose=205) is excluded by Nav2's
+               stock helper. Still allow one collision-checked retreat;
+               do not clear a real near obstacle or disable collision checks. -->
+          <ScriptCondition code="compute_path_error_code == 205"/>
         </Fallback>
         <!-- Retreat 18 cm to make space before turning. BackUp checks the
              local costmap; the motor bridge also checks rear LiDAR continuously.

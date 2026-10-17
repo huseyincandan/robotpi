@@ -25,6 +25,8 @@ from rclpy.node import Node
 from sensor_msgs.msg import Range
 from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
 from services.fixed_pwm import fixed_pwm_wheel_command
+from services.ultrasonic_range import mapping_range_m
+from config import ULTRASONIC
 
 
 class CmdVelBridge(Node):
@@ -40,6 +42,8 @@ class CmdVelBridge(Node):
         self.ultrasonic_endpoint = self.app_base_url + "/ultrasonic/readings"
         self.ultrasonic_rate_hz = max(2.0, float(args.ultrasonic_rate_hz))
         self.ultrasonic_x_offset = max(0.0, float(args.ultrasonic_x_offset))
+        self.ultrasonic_frame = "ultrasonic_link"
+        self.ultrasonic_max_range = float(ULTRASONIC["MAPPING_MAX_DISTANCE_CM"]) / 100.0
 
         self.max_linear = max(0.01, float(args.max_linear_x))
         self.s3_yaw_rate_control = args.s3_yaw_rate_control
@@ -108,7 +112,7 @@ class CmdVelBridge(Node):
             10
         )
         self.static_tf_broadcaster = StaticTransformBroadcaster(self)
-        self._publish_laser_transform()
+        self._publish_sensor_transforms()
 
         self.drive_timer = self.create_timer(
             max(0.02, 1.0 / max(5.0, float(args.drive_rate_hz))),
@@ -230,72 +234,41 @@ class CmdVelBridge(Node):
         except (urllib.error.URLError, TimeoutError, socket.timeout, ValueError):
             return
 
-        if payload.get("status") != "OK":
-            return
-
-        # A minority near cluster can be a stray echo (previously ~12 cm
-        # against a stable ~96 cm median). Only publish the full-window stable
-        # reading into both Nav2 costmaps; the motor's independent close-range
-        # stop still uses the conservative nearest confirmed cluster.
-        try:
-            confidence = float(payload.get("confidence", 0))
-        except (TypeError, ValueError, OverflowError):
-            return
-        if not bool(payload.get("stable", False)) or confidence < 0.7:
-            return
-        distance_cm = payload.get("distance_cm")
-
-        if distance_cm is None:
-            return
-
-        try:
-            measured_range = (
-                float(distance_cm) / 100.0
-                + self.ultrasonic_x_offset
-            )
-        except (TypeError, ValueError, OverflowError):
+        measured_range = mapping_range_m(
+            payload, ULTRASONIC["MAPPING_MAX_DISTANCE_CM"]
+        )
+        if measured_range is None:
             return
 
         msg = Range()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self.base_frame
+        msg.header.frame_id = self.ultrasonic_frame
         msg.radiation_type = Range.ULTRASOUND
         msg.field_of_view = math.radians(24.0)
         msg.min_range = 0.02
-        msg.max_range = 4.2
-        if not math.isfinite(measured_range) or not (
-            msg.min_range <= measured_range <= msg.max_range
-        ):
-            return
-        # RangeSensorLayer's variable-range handler rejects range > max_range
-        # outright (no clearing), so clamp to max_range instead of inf - with
-        # clear_on_max_reading enabled in nav2_params.yaml, that clamped
-        # max-range reading is what triggers clearing of the free space ahead.
-        msg.range = min(measured_range, msg.max_range)
+        msg.max_range = self.ultrasonic_max_range
+        msg.range = measured_range
         self.ultrasonic_pub.publish(msg)
 
-    def _publish_laser_transform(self):
-
-        if self.base_frame == self.laser_frame:
-            return
-
-        transform = TransformStamped()
-        transform.header.stamp = self.get_clock().now().to_msg()
-        transform.header.frame_id = self.base_frame
-        transform.child_frame_id = self.laser_frame
-        transform.transform.translation.x = self.laser_x_offset
-        transform.transform.translation.y = 0.0
-        transform.transform.translation.z = 0.0
-        transform.transform.rotation.x = 0.0
-        transform.transform.rotation.y = 0.0
-        transform.transform.rotation.z = 0.0
-        transform.transform.rotation.w = 1.0
-
-        self.static_tf_broadcaster.sendTransform(transform)
-        self.get_logger().info(
-            f"published static tf {self.base_frame}->{self.laser_frame} "
-            f"x={self.laser_x_offset:.3f}"
-        )
+    def _publish_sensor_transforms(self):
+        transforms = []
+        for frame, offset in (
+            (self.laser_frame, self.laser_x_offset),
+            (self.ultrasonic_frame, self.ultrasonic_x_offset)
+        ):
+            if frame == self.base_frame:
+                continue
+            transform = TransformStamped()
+            transform.header.stamp = self.get_clock().now().to_msg()
+            transform.header.frame_id = self.base_frame
+            transform.child_frame_id = frame
+            transform.transform.translation.x = offset
+            transform.transform.rotation.w = 1.0
+            transforms.append(transform)
+            self.get_logger().info(
+                f"published static tf {self.base_frame}->{frame} x={offset:.3f}"
+            )
+        self.static_tf_broadcaster.sendTransform(transforms)
 
     def _on_cmd_vel(self, msg):
 

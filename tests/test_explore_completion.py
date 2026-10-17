@@ -1,4 +1,4 @@
-"""A persistent no-frontier result must end exploration cleanly."""
+"""No frontiers pauses motion without canceling the requested session."""
 
 from pathlib import Path
 import threading
@@ -14,13 +14,15 @@ class RunningProcess:
 
 
 class ExploreCompletionTests(unittest.TestCase):
-    def test_persistent_no_frontiers_reports_completion(self):
+    def test_persistent_no_frontiers_waits_with_intent_preserved(self):
         navigator = Ros2NavigationService.__new__(Ros2NavigationService)
         navigator.enabled = True
         navigator._explore_state_lock = threading.Lock()
+        navigator._explore_start_lock = threading.Lock()
+        navigator._explore_retry_since = None
         navigator._explore_generation = 0
         navigator._exploration_intent = False
-        navigator._exploration_complete = False
+        navigator._exploration_waiting = False
         navigator._explore_process = None
         navigator._nav2_process = RunningProcess()
         navigator._cmdvel_bridge_process = None
@@ -46,12 +48,14 @@ class ExploreCompletionTests(unittest.TestCase):
             result = navigator.start_exploration()
 
         self.assertEqual(result["status"], "OK")
-        self.assertIn("complete", result["message"].lower())
+        self.assertIn("waiting", result["message"].lower())
         self.assertEqual(len(spawned), 3)
         self.assertEqual(len(terminated), 3)
-        self.assertFalse(navigator._exploration_intent)
+        self.assertTrue(navigator._exploration_intent)
         self.assertIsNone(navigator._explore_process)
-        self.assertEqual(navigator.status()["explore_reason"], "complete")
+        self.assertEqual(navigator.status()["explore_reason"], "waiting_for_frontiers")
+        self.assertTrue(navigator.status()["explore_running"])
+        self.assertFalse(navigator.status()["explore_active"])
 
 
 if __name__ == "__main__":

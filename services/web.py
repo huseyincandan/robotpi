@@ -4,6 +4,55 @@ import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ElementTree
+from html.parser import HTMLParser
+from services.conversation_text import normalize
+from services.news import search_news
+
+
+class BraveResultParser(HTMLParser):
+
+	def __init__(self):
+		super().__init__()
+		self.results = []
+		self.current = None
+		self.depth = 0
+		self.snippet_depth = None
+		self.snippet_parts = []
+
+	def handle_starttag(self, tag, attrs):
+		attrs = dict(attrs)
+		classes = attrs.get("class", "").split()
+		if tag == "div":
+			if self.current is None and attrs.get("data-type") == "web" and "snippet" in classes:
+				self.current = {"title": "", "url": "", "source": "Brave Search"}
+				self.depth = 1
+				self.snippet_parts = []
+			elif self.current is not None:
+				self.depth += 1
+			if self.current is not None and "search-snippet-title" in classes:
+				self.current["title"] = attrs.get("title", "")
+			if self.current is not None and "generic-snippet" in classes:
+				self.snippet_depth = self.depth
+		if self.current is not None and tag == "a" and "l1" in classes:
+			url = attrs.get("href", "")
+			if url.startswith(("https://", "http://")) and not self.current["url"]:
+				self.current["url"] = url
+
+	def handle_data(self, data):
+		if self.current is not None and self.snippet_depth is not None:
+			self.snippet_parts.append(data)
+
+	def handle_endtag(self, tag):
+		if tag != "div" or self.current is None:
+			return
+		if self.depth == self.snippet_depth:
+			self.snippet_depth = None
+		self.depth -= 1
+		if self.depth == 0:
+			self.current["snippet"] = " ".join(" ".join(self.snippet_parts).split())
+			if self.current["title"] and self.current["url"]:
+				self.results.append(self.current)
+			self.current = None
 
 
 class WebSearchService:
@@ -15,6 +64,27 @@ class WebSearchService:
 		}
 
 	def search(self, query, limit=5, news=False):
+
+		if news:
+			return search_news(query, limit, self.headers)
+
+		try:
+			results = self._search_bing(query, limit, news)
+		except Exception as exc:
+			print("BING SEARCH FAILED:", repr(exc), flush=True)
+			results = []
+		if results:
+			return results
+		print("WEB SEARCH FALLBACK: Brave Search", flush=True)
+		url = "https://search.brave.com/search?" + urllib.parse.urlencode({"q": query, "source": "web"})
+		request = urllib.request.Request(url, headers=self.headers)
+		with urllib.request.urlopen(request, timeout=8) as response:
+			body = response.read(2_000_000).decode("utf-8", errors="ignore")
+		parser = BraveResultParser()
+		parser.feed(body)
+		return [result for result in parser.results if self._relevant(query, result)][:limit]
+
+	def _search_bing(self, query, limit=5, news=False):
 
 		path = "news/search" if news else "search"
 		url = f"https://www.bing.com/{path}?" + urllib.parse.urlencode(
@@ -47,11 +117,26 @@ class WebSearchService:
 				{
 					"title": self._clean_text(item.findtext("title", "")),
 					"url": self._clean_url(item.findtext("link", "")),
-					"snippet": self._clean_text(item.findtext("description", ""))
+					"snippet": self._clean_text(item.findtext("description", "")),
+					"source": "Bing News RSS" if news else "Bing Web RSS"
 				}
 			)
 
-		return results[:limit]
+		relevant = [result for result in results if self._relevant(query, result)]
+		if len(relevant) != len(results):
+			print(f"WEB RELEVANCE: kept={len(relevant)} rejected={len(results) - len(relevant)} query={query}", flush=True)
+		return relevant[:limit]
+
+	def _relevant(self, query, result):
+		stopwords = {"hangi", "nedir", "neler", "nasil", "bana", "bir", "icin", "var",
+			"olan", "tum", "nelerdir", "say", "listele", "hakkinda", "bilgi", "ver",
+			"internetten", "arastir", "bugun", "bugunun", "son", "guncel", "ve"}
+		terms = {word[:5] for word in normalize(query).split() if len(word) >= 3 and word not in stopwords}
+		if not terms:
+			return False
+		content = normalize(" ".join(result.get(key, "") for key in ("title", "snippet", "url")))
+		matches = sum(term in content for term in terms)
+		return matches >= min(2, len(terms))
 
 	def _clean_text(self, text):
 

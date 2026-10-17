@@ -9,8 +9,9 @@ gpiozero
 lgpio
 pyserial
 openwakeword
-faster-whisper
+huggingface-hub
 openai
 python-dotenv
 smbus2
 rplidar-roboticia
+sherpa-onnx==1.13.8

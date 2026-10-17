@@ -2,9 +2,10 @@ import json
 import re
 import unicodedata
 
-from openai import OpenAI
+from services.llm import create_client, complete, INTENT_SCHEMA, INTENT_TYPES
 
 from config import INTENT
+from services.conversation_text import music_topic, needs_web
 
 
 class IntentService:
@@ -16,7 +17,7 @@ class IntentService:
 	def _get_client(self):
 
 		if self.client is None:
-			self.client = OpenAI()
+			self.client = create_client()
 
 		return self.client
 
@@ -27,7 +28,8 @@ class IntentService:
 		if local_intent:
 			return local_intent
 
-		response = self._get_client().chat.completions.create(
+		response = complete(
+			self._get_client(),
 			model=INTENT["MODEL"],
 			messages=[
 				{
@@ -40,7 +42,7 @@ class IntentService:
 				}
 			],
 			temperature=INTENT["TEMPERATURE"],
-			response_format={"type": "json_object"}
+			schema=INTENT_SCHEMA
 		)
 
 		try:
@@ -48,15 +50,25 @@ class IntentService:
 				response.choices[0].message.content
 			)
 
-		except json.JSONDecodeError:
+		except (json.JSONDecodeError, TypeError):
 			return {
 				"type": "chat",
 				"query": ""
 			}
 
+		if not isinstance(intent, dict) or intent.get("type") not in INTENT_TYPES:
+			return {"type": "chat", "query": ""}
+
+		# Listing arbitrary things must not trigger the robot's music catalogue.
+		if intent["type"] == "music.genres" and not music_topic(text):
+			return {"type": "chat", "query": ""}
+		# Ordinary knowledge questions can be answered without a web round trip.
+		if intent["type"] == "web.search" and not needs_web(text):
+			return {"type": "chat", "query": ""}
+
 		return {
-			"type": intent.get("type", "chat"),
-			"query": intent.get("query", "")
+			"type": intent["type"],
+			"query": intent.get("query", "") if isinstance(intent.get("query", ""), str) else ""
 		}
 
 	def _classify_local(self, text):

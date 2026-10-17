@@ -599,7 +599,7 @@ def register_control_routes(
                 "message": "Navigation service is not available"
             }
 
-        result = navigator.start_exploration()
+        result = await asyncio.to_thread(navigator.start_exploration)
 
         return {
             "status": result.get("status", "OK"),

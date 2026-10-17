@@ -66,6 +66,24 @@ class FrontierControllerConfigurationTests(unittest.TestCase):
         self.assertLessEqual(float(escape[0].attrib["backup_dist"]), 0.20)
         self.assertLessEqual(float(escape[0].attrib["backup_speed"]), 0.10)
 
+    def test_start_occupied_can_attempt_bounded_collision_checked_retreat(self):
+        root = ET.parse(ROOT / "config/nav2_bt_recovery_backup_first.xml").getroot()
+        recovery = root.find(".//RecoveryNode[@name='NavigateRecovery']")
+        eligibility = recovery.findall("./Sequence/Fallback")[0]
+        condition = eligibility.find("ScriptCondition")
+        self.assertIsNotNone(condition)
+        self.assertEqual(condition.attrib["code"], "compute_path_error_code == 205")
+        self.assertEqual(recovery.attrib["number_of_retries"], "1")
+        escape = recovery.findall("./Sequence/Fallback")[-1]
+        self.assertNotIn("disable_collision_checks", escape[0].attrib)
+
+    def test_sonar_at_trusted_limit_is_marked_not_used_to_clear_obstacles(self):
+        config = yaml.safe_load((ROOT / "config/nav2_params.yaml").read_text())
+        for name in ("local_costmap", "global_costmap"):
+            layer = config[name][name]["ros__parameters"]["range_layer"]
+            self.assertTrue(layer["enabled"])
+            self.assertFalse(layer["clear_on_max_reading"])
+
 
 if __name__ == "__main__":
     unittest.main()

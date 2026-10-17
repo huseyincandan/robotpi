@@ -1,9 +1,13 @@
 import os
+import math
+import selectors
 import subprocess
 import time
 import wave
+from openwakeword.vad import VAD
 
-from faster_whisper import WhisperModel
+from services.qwen_asr import QwenASRModel
+from services.speech_endpoint import SpeechEndpoint
 import numpy as np
 from openai import OpenAI
 
@@ -12,12 +16,16 @@ from config import STT
 
 class STTService:
 
-	def __init__(self):
+	def __init__(self, on_recorded=None):
 
+		self.on_recorded = on_recorded
+
+		self.vad = None
 		self.model = None
 		self.client = None
 		self.last_audio_stats = {}
 		self.last_had_audio = False
+		self.last_record_reason = None
 
 	def _get_client(self):
 
@@ -29,22 +37,27 @@ class STTService:
 	def _get_model(self):
 
 		if self.model is None:
-			self.model = WhisperModel(
-				STT["MODEL"],
-				device=STT["DEVICE"],
-				compute_type=STT["COMPUTE_TYPE"]
+			self.model = QwenASRModel(
+				model_dir=STT["MODEL_DIR"],
+				library_path=STT["LIBRARY_PATH"],
+				threads=int(STT.get("CPU_THREADS", 3)),
+				language=STT["LANGUAGE"]
 			)
 
 		return self.model
 
 	def load(self):
 
+		if self.vad is None:
+			self.vad = VAD()
 		if STT["PROVIDER"] == "openai":
 			return
 
 		self._get_model()
 
 	def record(self, cue=None, duration=None):
+
+		self.last_record_reason = None
 
 		try:
 			os.remove(
@@ -64,6 +77,9 @@ class STTService:
 					0.15
 				)
 			)
+
+		if STT.get("STOP_ON_SILENCE", True):
+			return self._record_until_silence(duration)
 
 		process = subprocess.Popen(
 			[
@@ -100,6 +116,81 @@ class STTService:
 				)
 			)
 
+		return STT["RECORD_FILE"]
+
+	def _record_until_silence(self, max_seconds):
+		"""Capture raw frames and stop after speech, with bounded startup/total wait."""
+		rate = int(STT["SAMPLE_RATE"])
+		channels = int(STT["CHANNELS"])
+		channel = int(STT.get("MICROPHONE_SELECT_CHANNEL", 0))
+		if not 0 <= channel < channels:
+			raise ValueError("Invalid microphone channel")
+		frame_samples = max(1, round(rate * 0.03))
+		frame_bytes = frame_samples * channels * 2
+		if self.vad is None:
+			self.vad = VAD()
+		self.vad.reset_states()
+		vad = self.vad
+		max_samples = max(1, round(max_seconds * rate))
+		endpoint = SpeechEndpoint(
+			rate,
+			silence_seconds=STT.get("END_SILENCE_SECONDS", 0.6),
+			start_timeout=STT.get("SPEECH_START_TIMEOUT_SECONDS", 3.0),
+			min_speech_seconds=STT.get("SPEECH_MIN_SECONDS", 0.12),
+			start_rms=STT.get("SPEECH_START_RMS", 700),
+			continue_rms=STT.get("SPEECH_CONTINUE_RMS", 450)
+		)
+		process = subprocess.Popen([
+			"arecord", "--quiet", "--file-type", "raw",
+			"--device", STT["MICROPHONE_DEVICE"], "--format", "S16_LE",
+			"--rate", str(rate), "--channels", str(channels),
+			"--duration", str(math.ceil(max_seconds) + 2)
+		], stdout=subprocess.PIPE)
+		pending = bytearray()
+		captured = bytearray()
+		reason = None
+		deadline = time.monotonic() + max_seconds + 3.0
+		try:
+			with selectors.DefaultSelector() as selector:
+				selector.register(process.stdout, selectors.EVENT_READ)
+				while reason is None:
+					if time.monotonic() >= deadline:
+						raise TimeoutError("Microphone capture stalled")
+					if not selector.select(timeout=0.2):
+						continue
+					data = os.read(process.stdout.fileno(), frame_bytes * 4)
+					if not data:
+						raise RuntimeError("Microphone stream ended before recording completed")
+					pending.extend(data)
+					while len(pending) >= frame_bytes and reason is None:
+						frame = np.frombuffer(bytes(pending[:frame_bytes]), dtype=np.int16)
+						del pending[:frame_bytes]
+						mono = frame.reshape(-1, channels)[:, channel].copy()
+						remaining = max_samples - len(captured) // 2
+						mono = mono[:remaining]
+						captured.extend(mono.tobytes())
+						# Keep the speech detector on complete 30 ms mono frames.
+						vad_frame = np.pad(mono, (0, frame_samples - len(mono))).astype(np.int16)
+						reason = endpoint.feed(mono, speech_detected=bool(vad.predict(vad_frame) >= STT.get("VAD_THRESHOLD", 0.5)))
+						if len(captured) // 2 >= max_samples:
+							reason = reason or "max_duration"
+		finally:
+			if process.poll() is None:
+				process.terminate()
+			try:
+				process.wait(timeout=1.0)
+			except subprocess.TimeoutExpired:
+				process.kill()
+				process.wait()
+			process.stdout.close()
+
+		with wave.open(STT["RECORD_FILE"], "wb") as audio:
+			audio.setnchannels(1)
+			audio.setsampwidth(2)
+			audio.setframerate(rate)
+			audio.writeframes(captured)
+		print(f"STT RECORD END: {reason} audio={len(captured) / (2 * rate):.2f}s", flush=True)
+		self.last_record_reason = reason
 		return STT["RECORD_FILE"]
 
 	def extract_channel(self, audio_file, channel_index):
@@ -141,17 +232,8 @@ class STTService:
 				transcription.text
 			)
 
-		segments, _ = self._get_model().transcribe(
-			audio_file,
-			language=STT["LANGUAGE"],
-			vad_filter=STT["VAD_FILTER"]
-		)
-
 		return self.clean_text(
-			" ".join(
-			segment.text.strip()
-			for segment in segments
-			)
+			self._get_model().transcribe(audio_file)
 		)
 
 	def clean_text(self, text):
@@ -311,7 +393,17 @@ class STTService:
 		)
 
 		start = time.monotonic()
-		text = self.transcribe(audio_file)
+		if self.last_record_reason == "no_speech":
+			self.last_had_audio = False
+			self.last_audio_stats = {}
+			text = ""
+		else:
+			if self.on_recorded:
+				try:
+					self.on_recorded(audio_file)
+				except Exception as exc:
+					print("SPEAKER CALLBACK ERROR:", repr(exc), flush=True)
+			text = self.transcribe(audio_file)
 		print(
 			f"TIMING: stt_transcribe {time.monotonic() - start:.2f}s",
 			flush=True

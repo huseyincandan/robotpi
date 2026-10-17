@@ -82,6 +82,7 @@ from routes.control import (
 from routes.webrtc import (
     register_webrtc_routes
 )
+from services.webrtc import close_existing_sessions
 
 from services.audio import (
     set_microphone_capture_volume,
@@ -147,8 +148,9 @@ class NullMotorService:
         self.current_x = 0.0
         self.current_y = 0.0
         self.last_obstacle_distance = None
+        self.last_block_reason = "motor_unavailable"
 
-    def drive(self, x, y):
+    def drive(self, x, y, source=None):
         self.current_x = float(x)
         self.current_y = float(y)
         return False
@@ -167,6 +169,10 @@ class NullMotorService:
     def close(self):
         return
 
+from services.local_llm import LocalLLMRuntime
+
+local_llm = LocalLLMRuntime()
+
 app = FastAPI()
 
 templates = Jinja2Templates(
@@ -181,9 +187,14 @@ app.mount(
 
 distance = _try_init_service(DistanceService, "DISTANCE")
 
+from services.speaker_identity import SpeakerIdentityService
+speaker_identity = SpeakerIdentityService()
+
 speech = SpeechService()
 
 try:
+    if os.environ.get("ROBOTPI_DISABLE_MOTORS") == "1":
+        raise RuntimeError("Motor driver disabled for camera-only check")
     motor = MotorService(
         distance=distance,
         imu=None
@@ -320,6 +331,7 @@ motor_safety_task = None
 startup_calibration_task = None
 map_jump_watchdog_task = None
 power_safety_task = None
+exploration_supervisor_task = None
 _shutdown_lock = threading.Lock()
 _motors_stopped = False
 
@@ -381,6 +393,9 @@ async def start_wake_listener():
     global startup_calibration_task
     global map_jump_watchdog_task
     global power_safety_task
+    global exploration_supervisor_task
+
+    await asyncio.to_thread(local_llm.start)
 
     if bool(AUDIO.get("ENABLED", True)):
         try:
@@ -417,14 +432,19 @@ async def start_wake_listener():
                 flush=True
             )
 
-    if bool(AUDIO.get("ENABLED", True)) and WAKE["ENABLED"] and movement and getattr(motor, "available", True):
+    if bool(AUDIO.get("ENABLED", True)) and WAKE["ENABLED"]:
+        try:
+            await asyncio.to_thread(speaker_identity.warmup)
+        except Exception as exc:
+            print('SPEAKER WARMUP ERROR:', repr(exc), flush=True)
         wake_task = asyncio.create_task(
             run_wake_loop(
-                motor=motor,
+                motor=motor if getattr(motor, "available", True) else None,
                 music=music,
                 movement=movement,
                 speech=speech,
-                power_monitor=power_monitor
+                power_monitor=power_monitor,
+                speaker_identity=speaker_identity
             )
         )
 
@@ -432,6 +452,10 @@ async def start_wake_listener():
         motor_safety_task = asyncio.create_task(
             motor.safety_loop()
         )
+        if navigator and lidar:
+            exploration_supervisor_task = asyncio.create_task(
+                navigator.supervise_exploration(motor, lidar)
+            )
 
     if distance:
         distance_warmup_task = asyncio.create_task(
@@ -443,12 +467,12 @@ async def start_wake_listener():
             _run_startup_lidar_calibration()
         )
 
-    if mapping and bool(MAP.get("MAP_JUMP_WATCHDOG_ENABLED", True)):
+    if mapping and getattr(motor, "available", True) and bool(MAP.get("MAP_JUMP_WATCHDOG_ENABLED", True)):
         map_jump_watchdog_task = asyncio.create_task(
             _run_map_jump_watchdog()
         )
 
-    if mapping and lidar and bool(MAP.get("LIDAR_FREEZE_WATCHDOG_ENABLED", True)):
+    if mapping and lidar and getattr(motor, "available", True) and bool(MAP.get("LIDAR_FREEZE_WATCHDOG_ENABLED", True)):
         lidar_freeze_watchdog_task = asyncio.create_task(
             _run_lidar_freeze_watchdog()
         )
@@ -824,6 +848,16 @@ async def _run_startup_lidar_calibration():
 async def stop_wake_listener():
     global startup_calibration_task
     global power_safety_task
+    global exploration_supervisor_task
+
+    if navigator:
+        await asyncio.to_thread(navigator.stop_exploration)
+    if exploration_supervisor_task:
+        exploration_supervisor_task.cancel()
+        try:
+            await exploration_supervisor_task
+        except asyncio.CancelledError:
+            pass
 
     if wake_task:
         wake_task.cancel()
@@ -833,6 +867,9 @@ async def stop_wake_listener():
 
         except asyncio.CancelledError:
             pass
+
+    speaker_identity.close()
+    await asyncio.to_thread(local_llm.stop)
 
     if motor_safety_task:
         motor_safety_task.cancel()
@@ -871,6 +908,7 @@ async def stop_wake_listener():
             pass
 
     _safe_stop_motors(reason="fastapi_shutdown")
+    await close_existing_sessions()
     if navigator:
         navigator.close()
 
@@ -915,3 +953,14 @@ if __name__ == "__main__":
         # high-frequency normal traffic and should not obscure real logs.
         access_log=False
     )
+
+
+@app.get("/speakers/status")
+async def speaker_status():
+    return speaker_identity.status()
+
+
+@app.post("/speakers/reload")
+async def speaker_reload():
+    await asyncio.to_thread(speaker_identity.reload_profiles)
+    return speaker_identity.status()

@@ -1,0 +1,17 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "RobotPi web application",
+			"type": "shell",
+			"command": ".venv/bin/python",
+			"args": [
+				"scripts/run_app.py",
+				"--launch-mode",
+				"manual"
+			],
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

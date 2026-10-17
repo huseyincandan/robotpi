@@ -26,6 +26,7 @@ ULTRASONIC = {
     "LOG_INTERVAL_SECONDS": 1,
     "SLOW_DISTANCE_CM": 90,
     "STOP_DISTANCE_CM": 20,
+    "MAPPING_MAX_DISTANCE_CM": 20,
     # Keep a separate near-field stop for real low obstacles below the LiDAR
     # plane even when Nav2's filtered RangeLayer is enabled.
     "AUTONOMOUS_STOP_DISTANCE_CM": 12,
@@ -177,8 +178,8 @@ CAMERA = {
     "WIDTH": 320,
     "HEIGHT": 240,
     "FPS": 15,
-    "BUFFER_SIZE": 1,
-    "FOURCC": "YUYV"
+    # Camera is mounted upright; no image rotation is needed.
+    "ROTATION_CCW_DEGREES": 0
 }
 
 APP = {
@@ -413,7 +414,7 @@ MAP = {
 
 LOGGING = {
     "DIR": "logs",
-    "KEEP_RUNS": 1,
+    "KEEP_RUNS": 10,
     # Keep rosbag captures and prior run evidence when the app restarts.
     "RESET_ON_START": False,
     "APP_LOG_FILE": "app.log"
@@ -448,10 +449,8 @@ MOVEMENT = {
 }
 
 AUDIO = {
-    # 2026-09-18: sarj sirasinda guc tuketimini dusurmek icin mikrofon/hoparlor
-    # fonksiyonlari (wake-word dinleme, TTS cikisi, webrtc mikrofon/hoparlor)
-    # gecici olarak kapatildi - ileride tekrar True yapilacak.
-    "ENABLED": False,
+    # Microphone and speaker enabled for speech tests.
+    "ENABLED": True,
     "MICROPHONE_CARD": "ArrayUAC10",
     "MICROPHONE_DEVICE": "dsnoop:CARD=ArrayUAC10,DEV=0",
     "MICROPHONE_FORMAT": "alsa",
@@ -492,7 +491,7 @@ SPEECH = {
     "LOCAL_CACHE_MAX_CHARS": 80,
     "CHUNK_LONG_TEXT": True,
     "CHUNK_MIN_CHARS": 140,
-    "WAKE_RESPONSE": "Efendim Hüseyin?",
+    "WAKE_RESPONSE": "Efendim?",
     "WAKE_RESPONSE_PAUSE": 0.1,
     "ASSISTANT_RESPONSE_PAUSE": 1.0,
     "BEEP_FILE": "/tmp/hamsibot-beep.wav",
@@ -510,12 +509,14 @@ SPEECH = {
 }
 
 STT = {
-    "PROVIDER": "openai",
-    "MODEL": "base",
+    "ECHO_TEST_MODE": False,
+    "PROVIDER": "qwen3-asr",
+    "MODEL": "Qwen/Qwen3-ASR-0.6B",
+    "MODEL_DIR": "models/qwen3-asr-0.6b",
+    "LIBRARY_PATH": "tools/qwen-asr/libqwen_asr.so",
     "OPENAI_MODEL": "gpt-4o-transcribe",
     "OPENAI_PROMPT": "Konuşma Türkçe. Kullanıcı HamsiBot adlı robot asistanla konuşuyor. Kaydın başında kısa bir bip sesi olabilir, bunu yok say. Eğer kayıtta anlaşılır insan konuşması yoksa hiçbir şey yazma. Kısa günlük soruları, robot komutlarını ve Türkçe özel isimleri doğru yaz.",
-    "DEVICE": "cpu",
-    "COMPUTE_TYPE": "int8",
+    "CPU_THREADS": 3,
     "LANGUAGE": "tr",
     # ReSpeaker 4 Mic Array donanimi sadece 16000Hz/6 kanal formatinda kayit
     # veriyor (kart adi = ArrayUAC10); kanal 0 islenmis/kazanc uygulanmis
@@ -526,17 +527,24 @@ STT = {
     "MICROPHONE_SELECT_CHANNEL": 0,
     "SAMPLE_RATE": 16000,
     "CHANNELS": 6,
-    "RECORD_SECONDS": 5,
+    "RECORD_SECONDS": 10,
+    "STOP_ON_SILENCE": True,
+    "END_SILENCE_SECONDS": 1.2,
+    "SPEECH_START_TIMEOUT_SECONDS": 4.0,
+    "VAD_THRESHOLD": 0.5,
+    "SPEECH_MIN_SECONDS": 0.12,
+    "SPEECH_START_RMS": 450,
+    "SPEECH_CONTINUE_RMS": 250,
     "RECORD_AFTER_CUE_DELAY": 0.15,
     "RECORD_FILE": "/tmp/hamsibot-question.wav",
     "TRIM_FILE": "/tmp/hamsibot-question-trimmed.wav",
     "TRIM_SILENCE": True,
-    "TRIM_PADDING_SECONDS": 0.2,
+    "TRIM_PADDING_SECONDS": 0.35,
     "TRIM_FRAME_MS": 30,
-    "TRIM_MIN_RMS": 700,
+    "TRIM_MIN_RMS": 250,
     "SILENCE_SKIP_SECONDS": 0.25,
-    "MIN_AUDIO_RMS": 700,
-    "ACTIVE_SAMPLE_THRESHOLD": 1000,
+    "MIN_AUDIO_RMS": 350,
+    "ACTIVE_SAMPLE_THRESHOLD": 600,
     "MIN_ACTIVE_RATIO": 0.04,
     "POSSIBLE_AUDIO_RMS": 400,
     "POSSIBLE_ACTIVE_RATIO": 0.015,
@@ -548,8 +556,7 @@ STT = {
         "teşekkürler",
         "thanks for watching"
     ],
-    "VAD_FILTER": True,
-    "EMPTY_TURNS_TO_SLEEP": 2,
+    "EMPTY_TURNS_TO_SLEEP": 1,
     "END_SESSION_COMMANDS": [
         "sohbeti bitir",
         "konuşmayı bitir",
@@ -562,18 +569,56 @@ STT = {
     ]
 }
 
+# One switch routes chat, intent classification and web planning together.
+# Set PROVIDER to "openai" and restart to restore the original model settings.
+LLM = {
+    "PROVIDER": "openai",
+    "MODEL": "qwen3-0.6b",
+    "BASE_URL": "http://127.0.0.1:8081/v1",
+    "PORT": 8081,
+    "SERVER_BIN": "tools/llama-runtime/llama-server",
+    "MODEL_FILE": "models/qwen3-0.6b/Qwen3-0.6B-Q8_0.gguf",
+    "CPU_THREADS": 3,
+    "CONTEXT_SIZE": 4096,
+    "MAX_TOKENS": 128,
+    "TEMPERATURE": 0.3,
+    "TIMEOUT_SECONDS": 60,
+    "STARTUP_TIMEOUT_SECONDS": 60,
+}
+
+SPEAKER_ID = {
+    "ENABLED": True,
+    "MODEL_ID": "campplus-en-voxceleb-16k-v1",
+    "MODEL_FILE": "models/speaker/campplus-en.onnx",
+    "PROFILE_FILE": "data/speakers/profiles.json",
+    "EMBEDDING_DIM": 512,
+    "WAKE_AUDIO_SECONDS": 2.5,
+    "WAKE_TAIL_CHUNKS": 3,
+    "MAX_WAKE_AUDIO_SECONDS": 1.6,
+    "MAX_AUDIO_SECONDS": 3.0,
+    "MIN_WAKE_SECONDS": 0.6,
+    "MIN_COMMAND_SECONDS": 1.2,
+    "MIN_RMS": 250,
+    "THRESHOLD": 0.75,
+    "MIN_MARGIN": 0.08,
+    "COMMAND_ALONE_THRESHOLD": 0.85,
+    "WORKER_NICE": 10,
+}
+
 ASSISTANT = {
+    "MAX_OUTPUT_TOKENS": 160,
+    "LOCAL_SYSTEM_PROMPT": "You are HamsiBot, a helpful robot assistant. Answer the user directly in Turkish, using at most two short sentences. If you do not know, say so. Do not use emoji, markdown or lists.",
     "MODEL": "gpt-4o",
     "TEMPERATURE": 0.2,
     "USE_HISTORY": True,
     "MAX_HISTORY_MESSAGES": 8,
-    "SYSTEM_PROMPT": "Sen HamsiBot adında Türkçe konuşan bir robot asistansın. Güncel tarih veya saat sorulursa sana verilen çalışma zamanı tarih bilgisini kullan; gerçek zamanlı internet, hava durumu, haber veya takvim erişimin yoksa bunu açıkça söyle ve uydurma. Kullanıcının söylediğini yanlış anlamış olabileceğini fark edersen tahmin yürütmeden kısa bir açıklama iste. Cevapların doğal, yardımsever, sıcak ve enerjik konuşma dilinde olsun. Sesli okunacağını düşünerek kısa konuş: genelde 1-3 cümle cevap ver. Emoji, markdown, yıldız, madde işareti, başlık ve liste kullanma."
+    "SYSTEM_PROMPT": "Sen HamsiBot adında Türkçe konuşan bir robot asistansın. Güncel tarih veya saat sorulursa sana verilen çalışma zamanı tarih bilgisini kullan; gerçek zamanlı internet, hava durumu, haber veya takvim erişimin yoksa bunu açıkça söyle ve uydurma. Kullanıcının söylediğini yanlış anlamış olabileceğini fark edersen tahmin yürütmeden kısa bir açıklama iste. Sesli konuşuyorsunuz; anlaşılmayan sözü yazım hatası olarak adlandırma. Sana farklı bir isimle hitap edilirse isim düzeltmesi yapma, isteğe odaklan. Cevapların doğal, yardımsever, sıcak ve enerjik konuşma dilinde olsun. Sesli okunacağını düşünerek kısa konuş: genelde 1-2 kısa cümle cevap ver. Kullanıcı örnekleri saymanı isterse en fazla 8 örnek ver. Her yanıtın sonuna başka konuda yardımcı olmayı teklif etme. Emoji, markdown, yıldız, madde işareti, başlık ve liste kullanma."
 }
 
 INTENT = {
     "MODEL": "gpt-4o-mini",
     "TEMPERATURE": 0,
-    "SYSTEM_PROMPT": "Kullanıcının Türkçe cümlesinden robot komut niyetini çıkar. Sadece JSON döndür. Desteklenen type değerleri: chat, local.time, system.shutdown, robot.move, audio.volume, device.status, web.search, music.play, music.stop, music.pause, music.resume, music.next, music.previous, music.genres. Saat kaç, bugünün tarihi nedir, günlerden ne gibi yerel sistem saati/tarihi sorularında local.time döndür ve query boş string olsun. Robotu, Raspberry Pi'yi veya sistemi tamamen kapatma isteklerinde system.shutdown döndür ve query boş string olsun. İleri git, geri git, sağa dön, sola dön, biraz geri git, yarım metre ileri git gibi robot hareket isteklerinde robot.move döndür ve query alanına kullanıcının hareket cümlesini aynen yaz. Sesi aç, sesi kıs, sesi yüzde elli yap, ses seviyesi kaçta/nedir gibi hoparlör ses seviyesini değiştiren veya soran isteklerde audio.volume döndür ve query alanına cümleyi aynen yaz. Batarya durumu, pil yüzdesi, şarj durumu, anlık akım/amper veya voltaj/gerilim sorularında device.status döndür ve query boş string olsun. Güncel hava durumu, maç sonucu, haber, son dakika, borsa, döviz veya internette aranması gereken güncel bilgi isteklerinde web.search döndür ve query alanına kısa arama metni yaz. Müzik/radyo çalma isteklerinde music.play döndür; query alanına yalnızca istenen müzik türünü yaz (örnek: caz, klasik, karadeniz, ankara), tür belirtilmemişse query boş string olsun. Hangi radyo kanalları/türleri var, kanalları listele, neler çalabilirsin gibi mevcut müzik türlerini sorma isteklerinde music.genres döndür ve query boş string olsun. Sonraki şarkı/kanal, kanalı değiştir, başka kanal/istasyon isteklerinde music.next, önceki şarkı/kanal isteklerinde music.previous, müzik duraklatma/bekletme komutlarında music.pause, müziğe devam etme/sürdürme/oynatma komutlarında music.resume, müzik durdurma/kapatma komutlarında music.stop döndür ve query boş string olsun. Emin değilsen chat döndür."
+    "SYSTEM_PROMPT": "Kullanıcının Türkçe cümlesinden robot komut niyetini çıkar. Sadece JSON döndür. Üniversite bölümleri gibi genel bilgi soruları chat olmalıdır. Bir şeyleri saymak veya listelemek tek başına music.genres değildir; bu niyet yalnız açıkça müzik, radyo veya kanal türlerini sorunca seçilir. web.search yalnız açık araştırma isteği veya güncel bilgi ihtiyacı için seçilir. Desteklenen type değerleri: chat, local.time, system.shutdown, robot.move, audio.volume, device.status, web.search, music.play, music.stop, music.pause, music.resume, music.next, music.previous, music.genres. Saat kaç, bugünün tarihi nedir, günlerden ne gibi yerel sistem saati/tarihi sorularında local.time döndür ve query boş string olsun. Robotu, Raspberry Pi'yi veya sistemi tamamen kapatma isteklerinde system.shutdown döndür ve query boş string olsun. İleri git, geri git, sağa dön, sola dön, biraz geri git, yarım metre ileri git gibi robot hareket isteklerinde robot.move döndür ve query alanına kullanıcının hareket cümlesini aynen yaz. Sesi aç, sesi kıs, sesi yüzde elli yap, ses seviyesi kaçta/nedir gibi hoparlör ses seviyesini değiştiren veya soran isteklerde audio.volume döndür ve query alanına cümleyi aynen yaz. Batarya durumu, pil yüzdesi, şarj durumu, anlık akım/amper veya voltaj/gerilim sorularında device.status döndür ve query boş string olsun. Güncel hava durumu, maç sonucu, haber, son dakika, borsa, döviz veya internette aranması gereken güncel bilgi isteklerinde web.search döndür ve query alanına kısa arama metni yaz. Müzik/radyo çalma isteklerinde music.play döndür; query alanına yalnızca istenen müzik türünü yaz (örnek: caz, klasik, karadeniz, ankara), tür belirtilmemişse query boş string olsun. Hangi radyo kanalları/türleri var, kanalları listele, neler çalabilirsin gibi mevcut müzik türlerini sorma isteklerinde music.genres döndür ve query boş string olsun. Sonraki şarkı/kanal, kanalı değiştir, başka kanal/istasyon isteklerinde music.next, önceki şarkı/kanal isteklerinde music.previous, müzik duraklatma/bekletme komutlarında music.pause, müziğe devam etme/sürdürme/oynatma komutlarında music.resume, müzik durdurma/kapatma komutlarında music.stop döndür ve query boş string olsun. Emin değilsen chat döndür."
 }
 
 SYSTEM = {
@@ -584,10 +629,12 @@ WEB = {
     "PLAN_MODEL": "gpt-4o-mini",
     "SEARCH_RESULT_LIMIT": 5,
     "WEATHER_DEFAULT_CITY": "Ankara",
-    "PLAN_SYSTEM_PROMPT": "Kullanıcının Türkçe güncel bilgi sorusu için internetten nasıl veri aranacağını planla. Sadece JSON döndür. source değerleri: weather, news, web. Hava durumu, sıcaklık, yağmur gibi meteoroloji sorularında weather seç. Güncel olay, haber, maç sonucu, toplantı, zirve, tarih, son dakika, borsa/döviz gibi hızlı değişen konularda news seç. Genel ansiklopedik veya daha durağan internet bilgisi için web seç. query alanına Türkçe, kısa ve net arama sorgusu yaz. weather için city alanına sadece kullanıcı cümlesinde açıkça geçen şehri yaz; şehir açıkça geçmiyorsa city boş string olsun. day alanı today, tomorrow veya day_after_tomorrow olsun."
+    "PLAN_SYSTEM_PROMPT": "Kullanıcının Türkçe güncel bilgi sorusu için internetten nasıl veri aranacağını planla. Sadece JSON döndür. source değerleri: weather, news, web. Hava durumu, sıcaklık, yağmur gibi meteoroloji sorularında weather seç. Güncel olay, haber, maç sonucu, toplantı, zirve, tarih, son dakika, borsa/döviz gibi hızlı değişen konularda news seç. Genel ansiklopedik veya daha durağan internet bilgisi için web seç. query alanına kısa anahtar kelimelerden oluşan bir sorgu yaz; soru cümlesini aynen kopyalama. Kurumların bilinen kısaltmasını kullanabilirsin. Üniversite bölümleri aranırken lisans programları ifadesini tercih et. weather için city alanına sadece kullanıcı cümlesinde açıkça geçen şehri yaz; şehir açıkça geçmiyorsa city boş string olsun. day alanı today, tomorrow veya day_after_tomorrow olsun."
 }
 
 MUSIC = {
+    "IPC_SOCKET": "/tmp/hamsibot-mpv.sock",
+    "STATE_FILE": "output/music/state.json",
     "PLAYER": "mpv",
     "AUDIO_DEVICE": "alsa/default:CARD=UACDemoV10",
     "VOLUME": 66,
@@ -652,13 +699,18 @@ WAKE = {
     "MICROPHONE_SELECT_CHANNEL": 0,
     "CAPTURE_SAMPLE_RATE": 16000,
     "MODEL_NAME": "hey_jarvis",
-    "THRESHOLD": 0.45,
-    "CONSECUTIVE_DETECTIONS": 1,
+    "THRESHOLD": 0.35,
+    "CONSECUTIVE_DETECTIONS": 2,
+    "CONFIRM_THRESHOLD": 0.20,
+    "STRONG_THRESHOLD": 0.60,
     "LISTEN_DURING_MUSIC": True,
-    "MUSIC_THRESHOLD": 0.38,
+    "LOG_SCORE_INTERVAL_SECONDS": 5,
+    "MUSIC_THRESHOLD": 0.30,
     "MUSIC_CONSECUTIVE_DETECTIONS": 2,
+    "MUSIC_CONFIRM_THRESHOLD": 0.18,
+    "MUSIC_STRONG_THRESHOLD": 0.50,
     "MUSIC_COMMAND_PAUSE_SECONDS": 0.6,
-    "MUSIC_COMMAND_RECORD_SECONDS": 3,
+    "MUSIC_COMMAND_RECORD_SECONDS": 10,
     "STARTUP_DISCARD_CHUNKS": 10,
     "COOLDOWN_SECONDS": 4,
     "REARM_DELAY_SECONDS": 2,

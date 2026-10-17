@@ -1,8 +1,8 @@
 /**:
   ros__parameters:
     robot_base_frame: base_link
-    # Finish at the last useful frontier; do not create an unexpected route
-    # back through already-mapped space.
+    # Do not return home when frontier search pauses. The app supervisor
+    # retains the requested session and periodically retries frontier search.
     return_to_init: false
     costmap_topic: /map
     costmap_updates_topic: /map_updates
@@ -63,5 +63,6 @@
     # frontier'lari) hedef olarak birakiyordu. Yukseltilince explore_lite
     # bu kucuk/dar frontier'lari tamamen eleyip sadece genis, acik alanlari
     # hedefler - kalan frontier'lar hep kucukse (yani sadece kose/dip detay
-    # kaldiysa) explore_lite kendiliginden durur, bu istenen davranis.
+    # kaldiysa) explore_lite bekler; uygulama gezinme istegini koruyup
+    # daha sonra tekrar arar, guvenli hedef yokken zorla hareket ettirmez.
     min_frontier_size: 0.9

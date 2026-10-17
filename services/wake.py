@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 import json
 import re
 import time
@@ -6,6 +7,7 @@ import time
 import numpy as np
 from openwakeword.model import Model
 
+from config import SPEAKER_ID
 from config import MUSIC
 from config import RADIO
 from config import SPEECH
@@ -20,11 +22,12 @@ from services.local_info import LocalInfoService
 from services.movement import MovementService
 from services.music import MusicService
 from services.speech import SpeechService
+from services.speaker_dialog import SpeakerDialog, profile_request
 from services.stt import STTService
 from services.system import SystemService
 
 
-def is_end_session_command(text):
+def is_end_session_command(text, exact=False):
 
 	normalized = re.sub(
 		r"[^\wçğıöşüÇĞİÖŞÜ]+",
@@ -32,6 +35,8 @@ def is_end_session_command(text):
 		text.lower()
 	).strip()
 
+	if exact:
+		return normalized in STT["END_SESSION_COMMANDS"]
 	return any(
 		command in normalized
 		for command in STT["END_SESSION_COMMANDS"]
@@ -253,6 +258,7 @@ class WakeWordListener:
 			1,
 			self.capture_sample_rate // self.model_sample_rate
 		)
+		self._speaker_audio = deque(maxlen=max(1, round(SPEAKER_ID["WAKE_AUDIO_SECONDS"] / 0.08)))
 		self.chunk_samples = 1280
 		self.capture_chunk_samples = int(
 			self.chunk_samples *
@@ -285,6 +291,7 @@ class WakeWordListener:
 			stdout=asyncio.subprocess.PIPE,
 			stderr=asyncio.subprocess.DEVNULL
 		)
+		self._speaker_audio.clear()
 		self.model.reset()
 		return True
 
@@ -307,6 +314,9 @@ class WakeWordListener:
 			await self.process.wait()
 
 		self.process = None
+
+	def speaker_audio(self):
+		return np.concatenate(list(self._speaker_audio)) if self._speaker_audio else np.empty(0, dtype=np.int16)
 
 	async def listen_once(self):
 
@@ -340,6 +350,8 @@ class WakeWordListener:
 			)[:, self.select_channel]
 
 		audio = capture_audio[::self.downsample_ratio].copy()
+
+		self._speaker_audio.append(audio.copy())
 
 		predictions = self.model.predict(
 			audio
@@ -398,15 +410,20 @@ class TurnState:
 
 async def _wait_for_wake_word(listener, music, last_wake):
 
-	wake_hits = 0
+	recent_scores = deque(maxlen=8)
+	score_peak = 0.0
+	log_interval = float(WAKE.get("LOG_SCORE_INTERVAL_SECONDS", 0))
+	next_score_log = time.monotonic() + log_interval
 
 	while True:
 		if SpeechService.is_speaking():
+			recent_scores.clear()
 			await listener.stop()
 			await asyncio.sleep(0.1)
 			continue
 
 		if music.is_playing() and not WAKE["LISTEN_DURING_MUSIC"]:
+			recent_scores.clear()
 			await listener.stop()
 			await asyncio.sleep(1)
 			continue
@@ -415,7 +432,7 @@ async def _wait_for_wake_word(listener, music, last_wake):
 			predictions, _ = await listener.listen_once()
 
 			if SpeechService.is_speaking():
-				wake_hits = 0
+				recent_scores.clear()
 				continue
 
 		except Exception as exc:
@@ -424,6 +441,7 @@ async def _wait_for_wake_word(listener, music, last_wake):
 				repr(exc),
 				flush=True
 			)
+			recent_scores.clear()
 			await listener.stop()
 			await asyncio.sleep(1)
 			continue
@@ -436,21 +454,30 @@ async def _wait_for_wake_word(listener, music, last_wake):
 		)
 		threshold = WAKE["THRESHOLD"]
 		consecutive_detections = WAKE["CONSECUTIVE_DETECTIONS"]
+		confirm_threshold = WAKE.get("CONFIRM_THRESHOLD", threshold)
+		strong_threshold = WAKE.get("STRONG_THRESHOLD", 1.0)
 
 		if music.is_playing():
 			threshold = WAKE["MUSIC_THRESHOLD"]
 			consecutive_detections = WAKE["MUSIC_CONSECUTIVE_DETECTIONS"]
+			confirm_threshold = WAKE.get("MUSIC_CONFIRM_THRESHOLD", threshold)
+			strong_threshold = WAKE.get("MUSIC_STRONG_THRESHOLD", 1.0)
 
-		if score < threshold:
-			wake_hits = 0
+		score_peak = max(score_peak, score)
+		if log_interval > 0 and time.monotonic() >= next_score_log:
+			print(f"WAKE LEVEL: peak={score_peak:.3f} threshold={threshold:.3f} music={music.is_playing()}", flush=True)
+			score_peak = 0.0
+			next_score_log = time.monotonic() + log_interval
+
+		if score < confirm_threshold:
+			recent_scores.clear()
 			continue
-
-		wake_hits += 1
-
-		if wake_hits < consecutive_detections:
+		recent_scores.append(score)
+		window = list(recent_scores)[-consecutive_detections:]
+		if score < strong_threshold and (len(window) < consecutive_detections or max(window) < threshold):
 			continue
-
-		wake_hits = 0
+		score = max(window)
+		recent_scores.clear()
 
 		now = time.monotonic()
 
@@ -940,12 +967,32 @@ async def _dispatch_intent(intent, text, state, *, music, speech, movement, assi
 	return await _handle_chat_fallback(text, assistant, speech, music, music_paused_for_wake, state)
 
 
+async def _acknowledge_wake(speech, speaker_identity=None):
+
+	step_start = time.monotonic()
+	response = SPEECH["WAKE_RESPONSE"]
+	if speaker_identity:
+		# Allow the short wake embedding to finish, with a fixed latency ceiling.
+		deadline = time.monotonic() + 0.25
+		status = speaker_identity.status()
+		while status['busy'] and time.monotonic() < deadline:
+			await asyncio.sleep(0.01)
+			status = speaker_identity.status()
+		match = status['wake_match']
+		if match:
+			response = f"Efendim, {match['name']}?"
+	await asyncio.to_thread(speech.say_local, response)
+	log_timing("wake_response_tts", step_start)
+	await asyncio.sleep(SPEECH["WAKE_RESPONSE_PAUSE"])
+
+
 async def run_wake_loop(
 	motor=None,
 	music=None,
 	movement=None,
 	speech=None,
-	power_monitor=None
+	power_monitor=None,
+	speaker_identity=None
 ):
 
 	listener = WakeWordListener(
@@ -953,7 +1000,7 @@ async def run_wake_loop(
 	)
 
 	speech = speech or SpeechService()
-	stt = STTService()
+	stt = STTService(on_recorded=speaker_identity.submit_command_file if speaker_identity else None)
 	assistant = AssistantService()
 	intent_service = IntentService()
 	local_info = LocalInfoService()
@@ -984,6 +1031,11 @@ async def run_wake_loop(
 			)
 
 			try:
+				if speaker_identity:
+					# Include the end of Jarvis before recognition and robot playback.
+					for _ in range(SPEAKER_ID.get("WAKE_TAIL_CHUNKS", 3)):
+						await listener.listen_once()
+					speaker_identity.begin_session(listener.speaker_audio())
 				wake_start = time.monotonic()
 				music_paused_for_wake = False
 
@@ -1001,20 +1053,7 @@ async def run_wake_loop(
 
 				assistant.reset()
 
-				if not music_paused_for_wake:
-					step_start = time.monotonic()
-					await asyncio.to_thread(
-						speech.say_local,
-						SPEECH["WAKE_RESPONSE"]
-					)
-					log_timing(
-						"wake_response_tts",
-						step_start
-					)
-
-					await asyncio.sleep(
-						SPEECH["WAKE_RESPONSE_PAUSE"]
-					)
+				await _acknowledge_wake(speech, speaker_identity)
 
 				await listener.stop()
 				await stt_task
@@ -1023,6 +1062,13 @@ async def run_wake_loop(
 					"LISTENING FOR COMMAND",
 					flush=True
 				)
+
+				identity_checked = False
+				if speaker_identity and speaker_identity.config['ENABLED'] and not speaker_identity.status()['profiles']:
+					await SpeakerDialog(speaker_identity, stt, speech).run()
+					identity_checked = True
+					assistant.set_speaker(speaker_identity.session_name())
+					await asyncio.to_thread(speech.say_local, 'Seni dinliyorum. Ne yapmak istersin?')
 
 				state = TurnState()
 
@@ -1036,6 +1082,8 @@ async def run_wake_loop(
 						speech.safe_beep if music_paused_for_wake else speech.beep,
 						WAKE["MUSIC_COMMAND_RECORD_SECONDS"] if music_paused_for_wake else None
 					)
+					if speaker_identity:
+						assistant.set_speaker(speaker_identity.session_name())
 					log_timing(
 						"stt_listen_record_and_transcribe",
 						step_start
@@ -1054,7 +1102,31 @@ async def run_wake_loop(
 						flush=True
 					)
 
+					if STT.get("ECHO_TEST_MODE", False):
+						print("STT ECHO:", text or "<empty>", flush=True)
+						await asyncio.to_thread(
+							speech.say_local,
+							text or "Anlaşılır bir konuşma algılayamadım."
+						)
+						state.session_ended = True
+						break
+
 					if text:
+						if is_end_session_command(text, exact=True) and not re.fullmatch(r"kapat[.!?\s]*", text.lower()):
+							state.session_ended = True
+							print('SESSION ENDED BY COMMAND', flush=True)
+							break
+						profile_action = profile_request(text)
+						if profile_action and speaker_identity and speaker_identity.config['ENABLED']:
+							await SpeakerDialog(speaker_identity, stt, speech).run(mode=profile_action)
+							identity_checked = True
+							assistant.set_speaker(speaker_identity.session_name())
+							await asyncio.to_thread(speech.say_local, 'Sohbete devam edebiliriz. Seni dinliyorum.')
+							continue
+						if speaker_identity and not identity_checked and speaker_identity.should_offer_identification():
+							await SpeakerDialog(speaker_identity, stt, speech).run()
+							identity_checked = True
+							assistant.set_speaker(speaker_identity.session_name())
 						step_start = time.monotonic()
 						intent = await asyncio.to_thread(
 							intent_service.classify,
@@ -1130,14 +1202,6 @@ async def run_wake_loop(
 
 					state.empty_turns += 1
 
-					if stt.last_had_audio:
-						print(
-							"STT HEARD AUDIO BUT NO TEXT; LISTENING AGAIN",
-							flush=True
-						)
-						state.empty_turns = 0
-						continue
-
 					if state.empty_turns >= STT["EMPTY_TURNS_TO_SLEEP"]:
 						if music_paused_for_wake:
 							await asyncio.to_thread(
@@ -1176,6 +1240,8 @@ async def run_wake_loop(
 
 				if state.music_started:
 					rearm_delay = WAKE["MUSIC_REARM_DELAY_SECONDS"]
+				if state.empty_turns >= STT["EMPTY_TURNS_TO_SLEEP"]:
+					rearm_delay = 0
 
 				await asyncio.sleep(
 					rearm_delay
@@ -1199,6 +1265,8 @@ async def run_wake_loop(
 				)
 
 			finally:
+				if speaker_identity:
+					speaker_identity.end_session()
 				await listener.stop()
 
 	except asyncio.CancelledError:

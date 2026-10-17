@@ -62,7 +62,8 @@ def unsafe(state, front_abort_cm, min_clearance_cm):
     if (ultrasonic.get("status") == "OK" and ultrasonic.get("stable")
             and ultrasonic.get("nearest_cluster_confirmed")
             and ultrasonic.get("distance_cm") is not None
-            and ultrasonic["distance_cm"] <= 12):
+            and ultrasonic["distance_cm"] <= 12
+            and motor.get("current_y", 0) > 0):
         return "low_front_obstacle"
     return None
 

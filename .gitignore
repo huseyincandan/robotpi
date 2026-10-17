@@ -23,3 +23,10 @@ data/
 
 # Local Arduino toolchain and firmware build artifacts
 .arduino-local/
+
+# Locally built Qwen ASR runtime (see scripts/setup_qwen_asr.py)
+tools/qwen-asr/
+tools/qwen-runtime/
+tools/llama.cpp/
+tools/llama-runtime/
+output/music/

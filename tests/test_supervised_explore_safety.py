@@ -30,6 +30,16 @@ class SupervisedExploreSafetyTests(unittest.TestCase):
         state["lidar"]["left_cm"] = 17.0
         self.assertEqual(unsafe(state, 32, 18), "clearance_under_limit")
 
+    def test_low_front_obstacle_allows_retreat_and_rotation_not_forward(self):
+        for speed in (-25, 0, 25):
+            state = self.state(speed)
+            state["lidar"]["front_cm"] = 50
+            state["ultrasonic"]["distance_cm"] = 8.7
+            self.assertEqual(
+                unsafe(state, 32, 18),
+                "low_front_obstacle" if speed > 0 else None
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

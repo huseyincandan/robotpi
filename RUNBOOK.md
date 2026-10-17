@@ -3,6 +3,30 @@
 Geliştirme/test ve GPIO26 üretim başlatması aynı launcher'ı kullanır. Uygulama
 ve ROS düğümlerini ayrı terminallerden elle başlatmayın.
 
+## Müzik oynatıcısını yeniden başlatma sonrası devralma
+
+mpv, `/tmp/hamsibot-mpv.sock` JSON IPC soketiyle yönetilir. Uygulama yeniden
+başlarken açık oynatıcıya tekrar bağlanır; radyo uygulama kapanınca çalmaya
+devam edebilir. İstasyon listesi, sıra ve ses seviyesi atomik olarak
+`output/music/state.json` dosyasına yazılır. Dosya yoksa veya bozuksa açık
+oynatıcıdan mevcut yayın ve ses seviyesi okunur. Başka süreçlerin yanlışlıkla
+durdurulmaması için sahiplik, mpv komut satırı ve süreç başlangıç kimliği
+kontrol edilir.
+
+Eski, yalnız stdin ile yönetilen sürümden kalmış tek bir mpv varsa, uygulamanın
+mpv log dosyasına yazdığı doğrulanır ve aynı yayın/ses seviyesiyle IPC kullanan
+oynatıcıya bir kez taşınır; kısa bir ses kesintisi olabilir. Eski bellekte
+kalmış istasyon listesinin tamamı kurtarılamaz; yeni başlatılan listeler
+bundan sonra durum dosyasında korunur.
+
+Müzik sırasında uyandırma dinlemesi açıktır. Test ayarında normal/müzikli
+eşik 0,25 ve gerekli art arda algılama sayısı 1'dir; radyo devralınınca daha
+katı bir eşiğe geçilmez. `WAKE LEVEL` her 5 saniyede tepe puanı ve etkin eşiği
+yazar. `LOG_SCORE_INTERVAL_SECONDS=0` bu tanılama çıktısını kapatır.
+Uyandırma algılanınca müzik duraklatılır ve normalde olduğu gibi sesli
+"Efendim Hüseyin?" yanıtı verilir. Müzikli komut kaydının üst sınırı da
+10 saniyedir; sessizlikte erken bitiş uygulanır.
+
 ## Geliştirme veya test
 
 ```bash
@@ -21,6 +45,185 @@ dosyasını aynı sırayla kaynak edin. Daha önce tanı sırasında yanlışlı
 `~/ros2_ws/install/setup.bash` kullanılmış ve Python/ROS uyuşmazlığı olduğu
 sonucu çıkarılmıştı; bu teşhis geçersizdi. Doğru workspace ve underlay ile ROS
 mesaj tipleri ve TF kontrolü çalışıyor.
+
+## Yerel sohbet, niyet ve web planı: Qwen3-0.6B
+
+Konuşma metni, seçilen niyet, verilen yanıt ve aşama süreleri her oturumun
+`logs/run-*/app.log` dosyasında yazılır; son 10 oturum korunur. Genel bilgi
+soruları sohbet olarak yanıtlanır. Müzik türlerini listeleme niyeti için
+müzik/radyo bağlamı gerekir. "İnternetten araştır" gibi konu belirtmeyen
+devam istekleri son kullanıcı konusuna bağlanır; konu yoksa açıklama istenir.
+Arama sonuçlarına temel konu uygunluğu filtresi uygulanır; filtre güvenilirlik
+doğrulaması değildir, açıkça alakasız sonuçların yanıta taşınmasını engeller.
+Bing RSS sonuçları hatalı veya boşsa Brave Search HTML sonuçları denenir;
+yanıta verilen arama bağlamında gerçek sağlayıcının adı korunur. Her iki
+kaynak da konuya uygun sonuç vermezse asistan bunu açıkça söyler.
+`SPEECH:` satırları yerel komut yanıtları dahil gerçekten seslendirmeye
+gönderilen metni de kaydeder. Kayıt `no_speech` ile bittiyse arka planın
+sesli örnek oranı oturumu açık tutmaz; iki boş turdan sonra uyandırma
+dinleyicisine dönülür.
+
+2026-10-16 denemesinde Qwen3-0.6B Q8, niyet ve web planı örneklerini
+çözebildi; genel Türkçe sohbette temel bilgi ve aritmetik hataları sürdü.
+Bu nedenle etkin `LLM.PROVIDER` tekrar `openai` yapıldı. Yerel model ve
+bağlantı kodu yeniden denemek için saklanır. Sonuçlar
+`logs/qwen-llm-benchmark.json` ve `logs/qwen-llm-chat-benchmark.json` içindedir.
+
+`LLM.PROVIDER="qwen"` sohbeti, niyet sınıflandırmasını, web arama planını ve
+arama sonuçlarının yanıtlanmasını aynı yerel Qwen3-0.6B servisine yönlendirir.
+STT ayrı Qwen3-ASR 0.6B, seslendirme Piper olarak kalır. Hava durumu ve web
+arama verileri hâlâ internetten alınır; bu servisler OpenAI gerektirmez.
+
+Kurulum:
+
+```bash
+.venv/bin/python scripts/setup_local_llm.py
+ROBOTPI_DISABLE_MOTORS=1 .venv/bin/python scripts/run_app.py --launch-mode manual
+```
+
+Kurulum, llama.cpp `b11669` resmî ARM64 paketini SHA256 ile doğrulayıp
+`tools/llama-runtime` altına kurar ve resmî `Qwen/Qwen3-0.6B-GGUF` Q8_0 ağırlığını indirir. Uygulama
+başlarken yalnız `127.0.0.1:8081` adresinde llama-server açılır; kapanırken
+kendi başlattığı sunucuyu kapatır. Model bellekte kalır. Düşünme kapalıdır,
+bağlam 4096, yanıt sınırı 128 token, işlemci iş parçacığı sayısı 3'tür.
+Sunucu günlüğü `logs/qwen-llm-server.log` dosyasındadır. `TIMING: llm`
+satırları her çağrının modelini ve süresini gösterir. JSON işlevleri şema ile
+kısıtlanır; tanınmayan niyetler komut olarak çalıştırılmaz.
+
+OpenAI'ya dönüş: `config.py` içinde yalnız `LLM.PROVIDER="openai"` yapıp
+uygulamayı yeniden başlatın. `ASSISTANT.MODEL`, `INTENT.MODEL` ve
+`WEB.PLAN_MODEL` eski OpenAI modellerini dönüş için saklar; Qwen seçiliyken
+etkin model `LLM.MODEL` değeridir. Otomatik buluta geçiş yapılmaz.
+Normal sesli sohbet için `STT.ECHO_TEST_MODE=False` kullanılır.
+
+## Yerel STT testi: Qwen3-ASR 0.6B
+
+STT varsayılanı `Qwen/Qwen3-ASR-0.6B`; Türkçe zorlanır. Resmî ağırlıklar
+`models/qwen3-asr-0.6b` altında tutulur. CPU çıkarımı, MIT lisanslı
+[`antirez/qwen-asr`](https://github.com/antirez/qwen-asr) C motorunun
+`924694251d9e0f18e5d86bbd06aa3ab5f870002d` sürümüyle yapılır.
+Model süreç içinde bir kez yüklenir; her kayıt için yeniden yüklenmez.
+
+Debian ARM64 Pi üzerinde kurulum/yeniden derleme:
+
+```bash
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python scripts/setup_qwen_asr.py
+ROBOTPI_DISABLE_MOTORS=1 .venv/bin/python scripts/run_app.py --launch-mode manual
+```
+
+Kurulum GCC, git, apt-get ve dpkg-deb gerektirir. OpenBLAS paketleri yalnız
+`tools/qwen-runtime` altına açılır; sistem paketleri değiştirilmez.
+`STT.CPU_THREADS=3` kullanılır. `STT.ECHO_TEST_MODE=True` iken Hey Jarvis ve
+kayıt bipinden sonra çözülen metin Piper ile aynen okunur; intent/LLM veya
+hareket komutu çalıştırılmaz. Her denemeden sonra yeniden Hey Jarvis beklenir.
+Normal konuşmaya dönmek için `ECHO_TEST_MODE=False` yapıp yeniden başlatın.
+
+Kayıt sabit süre beklemez: ReSpeaker'ın işlenmiş kanalında konuşma sonrasında
+1,2 saniye sessizlikte biter (`END_SILENCE_SECONDS`). Konuşma başlamazsa
+4 saniye sonra kapanır; normal kayıt üst sınırı 10 saniyedir. Müzik komutunun
+özel süre sınırı korunur. RMS başlangıç/devam eşikleri 450/250'dir; başlangıç
+için en az 0,12 saniye etkin ses gerekir. `STOP_ON_SILENCE=False` eski sabit
+süreli kayda döner. Son kırpma eşiği 250 RMS, kenar payı 0,35 saniyedir.
+`STT RECORD END` satırı bitiş nedenini ve ses süresini yazar.
+
+## Pi kamera web yayını
+
+WebRTC yayını CSI kamerayı Picamera2/libcamera üzerinden açar; USB webcam
+için kullanılan doğrudan OpenCV/V4L2 yakalaması artık kullanılmaz.
+Raspberry Pi OS paketleri `python3-picamera2` ve `python3-libcamera` gereklidir
+(bu Pi'de kurulu). Yerel libcamera bağları nedeniyle bunları pip ile kurmayın.
+Kamera açılırken `/usr/lib/python3/dist-packages` uygulamanın Python arama
+yolunun sonuna eklenir; sanal ortam paketleri önceliğini korur. Sanal ortam
+Python'ı sistem Python'ıyla aynı sürümde olmalıdır.
+
+`config.py` içindeki `CAMERA` ayarları 320×240 / 15 FPS yakalamayı korur.
+Kamera montajı düzeltildiği için `ROTATION_CCW_DEGREES: 0` kullanılır.
+Tarayıcıya kırpılmadan 320×240 görüntü gönderilir; CSS ile ayrıca döndürme
+yapılmaz. Montaj değişirse bu ayar 0, 90, 180 veya 270 olabilir.
+
+Yalnız kamera kontrolünde motor sürücüsünü açmadan başlatmak için:
+
+```bash
+ROBOTPI_DISABLE_MOTORS=1 .venv/bin/python scripts/run_app.py --launch-mode manual
+```
+
+Kamera ilk web bağlantısında açılır, bağlantı kesilince veya uygulama
+kapanınca serbest bırakılır. Kareler olay döngüsünü bloke etmeden okunur;
+WebRTC zaman damgaları sensör zamanından hesaplanır.
+
+## 2026-10-15 yakın ultrasonik engel ve kurtarma
+
+Ultrasonik ölçümler yalnızca `ULTRASONIC.MAPPING_MAX_DISTANCE_CM = 20`
+aralığında, kararlı ve güveni en az 0,7 ise `/ultrasonic_range` üzerinden
+Nav2'nin yerel/global costmap'lerine gönderilir. 20 cm üstündeki ölçümler
+ne engel eklemek ne de engel silmek için kullanılır. Bu, SLAM'in kalıcı
+LIDAR haritasını değil navigasyonun engel katmanlarını günceller.
+
+Mesafe artık sensör yüzeyinden ölçülen gerçek mesafedir; gövde ofseti
+mesafeye eklenmez. `base_link → ultrasonic_link` statik TF'si sensörü arka
+aksın 0,27 m önüne taşır. Böylece sonar konisinin başlangıcı da doğru yerde
+olur. İki costmap'te `clear_on_max_reading: false` kullanılır; güven
+sınırındaki 20 cm'lik gerçek engel, boş alan bildirimi olarak yorumlanmaz.
+12 cm ileri durdurma ve arka LIDAR kontrolleri korunur.
+
+Davranış ağacının standart `WouldAPlannerRecoveryHelp` filtresi
+`ComputePathToPose.START_OCCUPIED = 205` hatasında kurtarmaya izin vermiyordu:
+robot aynı yerde kalırken yeni frontier hedefleri de reddediliyordu.
+Bu hata artık bir kez çarpışma denetimli BackUp, gerekirse Spin denemesine
+izin verir. Gerçek engeli silme, çarpışma denetimini kapatma veya sınırsız
+geri çekilme yapılmaz.
+
+Gözetimli denemede yakın ön sonar engeli yalnızca ileri hareketi durdurur;
+geri çekilme/dönüş sırf ön sonar yakın diye kesilmez. Her yöndeki 18 cm
+LIDAR alt sınırı, pil ve sensör arıza denetimleri yürürlüktedir.
+
+Canlı doğrulama:
+
+- Yaklaşık 8,7 cm sonar engeli iki costmap'te de maliyet 254 olarak görüldü.
+- Aynı konumdan Nav2 BackUp ile 12 cm geri çekilme başarılı oldu.
+- 205 hatası ardından otomatik BackUp çalıştı; 18 cm kurtarma tamamlandı.
+- `logs/nav2-supervised-20261015-203602` kaydında yaklaşık 3,94 m odometri
+  yolu ve bir başarılı navigasyon hedefi var. Sonraki engelli hedefte
+  kurtarma/reseçim görüldü; deneme 30,63 cm ön LIDAR ölçümünde gözetimli
+  32 cm ileri sınırıyla durdu. Tüm ortamda hatasız gezinme kanıtı değildir.
+
+ROS tanı ve kayıt komutlarında aynı underlay/workspace'i yükleyip
+`export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` kullanın; uygulamanın ROS
+süreçleri de bu middleware ile çalışır.
+
+## Sürekli gezinme oturumu
+
+`/explore/start` ve `/wander/start` gezinme isteğini açar. Bir hedefin
+başarısız olması, yakın engel, geçici kara liste veya frontier kalmaması
+bu isteği kapatmaz. Nav2 mevcut çarpışma denetimli kurtarmalarını dener;
+aktif hedef yokken uygulamanın takip döngüsü keşfi yeniden değerlendirir:
+
+- Kapanmış keşif süreci 10 saniyelik beklemeden sonra yeniden başlatılır.
+- Hedef bulamayan/bekleyen keşif 30 saniyeden sonra yeniden başlatılır;
+  böylece geçici frontier kara listesi de yenilenir.
+- Aktif navigasyon hedefi takip döngüsü tarafından kesilmez.
+- Uygun güvenli hedef yoksa motorlar bekleyebilir; bu, oturumun kapandığı
+  anlamına gelmez. Sırf hareket sürsün diye engel silinmez veya rastgele
+  motor komutu verilmez. Keşif bitince bilinen alanda devriye yapılmaz.
+
+`/nav2/status` içinde `explore_running` ve `exploration_intent` oturum
+isteğini; `explore_active` aktif hedefi; `explore_process_running` gerçek
+keşif sürecini gösterir. `waiting_for_frontiers` durumunda web arayüzündeki
+düğme hâlâ “Durdur” olarak kalır. Bu, eski `explore_running = aktif hedef`
+anlamından kasıtlı değişikliktir.
+
+`/explore/stop`, `/wander/stop` veya `/nav2/stop` isteği kapatır. Durdurma,
+devam eden başlatma/yeniden denemeyi nesil sayacıyla geçersiz kılar; geç
+tamamlanan bir işlem gezinmeyi yeniden açamaz. Uygulama kapanışında da
+takip döngüsü iptal edilir. Kritik pil, sensör arızası ve harita bozulması
+nedeniyle mevcut güvenlik duruşları korunur; bunların ardından operatör
+onayı olmadan oturum yeniden açılmaz.
+
+`scripts/run_supervised_explore.py` ayrı bir **süreli test aracıdır**:
+32 cm ön sınırı, 18 cm genel sınır veya süre sonu nedeniyle navigasyonu
+bilerek kapatır. Sürekli kullanım başlatmak için bu aracı kullanmayın.
+Uygulamanın web düğmelerini veya yukarıdaki HTTP uçlarını kullanın.
 
 ## Üretim / GPIO26
 
@@ -291,3 +494,99 @@ maliyet haritasında ayak izi yakınında 0,22 m'de öldürücü engel varken RP
 hedef hatası serbest yol varmış gibi davranılarak giderilmemeli. IMU bir
 `impact` durdurması kaydetti; fiziksel temas olup olmadığı doğrulanmadı.
 Koridorun/evin tüm haritasının tamamlandığı henüz doğrulanmadı.
+
+### Konuşmacı tanıma
+
+`SPEAKER_ID` yerel CAMPPlus (sherpa-onnx, CPU, tek iş parçacığı) kullanır.
+Uyandırmadan önceki son 2,5 saniye yalnızca RAM'de tutulur. Uyandırma tahmini
+komut kaydıyla doğrulanır; çelişkili veya belirsiz sonuçlarda isim kullanılmaz.
+Komut tek başına daha yüksek eşikle eşleşebilir. Tanıma STT ile paraleldir;
+LLM yanıtı sonucu beklemez. Doğrulanan kimlik oturum bitince temizlenir.
+Ses kimliği yetkilendirme amacıyla kullanılmaz. Eşikler Türkçe gerçek kayıtlarla
+henüz kalibre edilmedi; model VoxCeleb İngilizce verisiyle eğitilmiştir.
+
+Profil yokken çıkarım/model yükleme yapılmaz. Şu an kimse kaydedilmedi.
+Kurulum: `.venv/bin/python scripts/setup_speaker_id.py` (bağımlılık requirements.txt).
+Daha sonra açıkça profil eklemek için, her grupta en az üç farklı mono PCM16
+16 kHz WAV kaydıyla:
+
+```
+.venv/bin/python scripts/speaker_profiles.py enroll --name Ada --wake wake1.wav wake2.wav wake3.wav --command command1.wav command2.wav command3.wav
+.venv/bin/python scripts/speaker_profiles.py list
+.venv/bin/python scripts/speaker_profiles.py delete PROFIL_ID
+curl -X POST http://127.0.0.1:5000/speakers/reload
+```
+
+`GET /speakers/status` profil adlarını ve geçerli oturum durumunu gösterir.
+Şablonlar git dışında `data/speakers/profiles.json` içinde 0600 izniyle tutulur;
+özellik ham sesi arşivlemez. CLI değişikliklerinden sonra reload çağrılmalıdır.
+
+Sesli profil kaydı da desteklenir: uyandırmada eşleşme yoksa robot adını sorar,
+duyduğu adı doğrulatır. Kayıtlı isim için uzun bir cümleyle tekrar karşılaştırır.
+Eşleşmezse ilk kayıt olup olmadığını sorar; aynı isimdeki mevcut profili
+üzerine yazmaz, ayrı bir ad/soyad ister. Yeni kişi kayıt sorusuna evet derse
+üç uyandırma ve üç komut cümlesi toplar. Sessizlik/iptal/eksik veya tutarsız
+örneklerde profil kaydedilmez; her örnek en fazla iki kez denenir. Başarılı
+kayıt hemen ve sonraki uygulama başlangıçlarında kullanılabilir. Bilinen
+uyandırma sesi sonraki komutla doğrulanamazsa aynı konuşmalı akışa geçer.
+Bu diyalog LLM'ye veya hareket/araç komutlarına yönlendirilmez.
+
+Sohbet sırasında `Ses profilimi oluştur` veya `Ses profilimi güncelle`
+denebilir. Bu talepler LLM/araç sınıflandırmasından önce yerel diyaloga gider.
+Güncelleme adın doğrulanmasını, mevcut sesle yeniden eşleşmeyi ve sesli onayı
+ister. Altı yeni örnek tamamlanınca aynı profil kimliğiyle atomik olarak
+kaydedilir. İptal, tutarsız örnekler veya yazma hatasında eski kayıt korunur.
+Kayıtlı profil bulunamazsa yeni kayıt için onay istenir.
+
+İsim onayında `hayır` demek kayıt akışını iptal etmez; ad yeniden sorulur.
+Uyandırma eşleşmesi varsa selamlama `Efendim, [isim]?` olur. Selamlama eşleşme
+sonucunu en fazla 250 ms bekler; sonuç belirsizse genel selamlama kullanılır.
+Profil varsa model uygulama açılışında ısıtılır. Bu selamlama tahmini kimliği
+kullanır; sohbet kimliği yine sonraki komutla doğrulanır.
+
+Komut dinlemesinde tek boş tur yeterlidir (`EMPTY_TURNS_TO_SLEEP=1`).
+Konuşma başlangıcı 4 saniye beklenir; ortam sesinin yüksekliği tek başına
+beklemeyi uzatmaz. openWakeWord paketindeki Silero VAD tek CPU iş parçacığıyla
+30 ms karelerde çalışır (eşik 0.5). Konuşma yoksa STT çağrılmadan Hey Jarvis
+bekleme moduna dönülür. 4 saniye kayıt süresidir; bip/kayıt hazırlığı ve kapanış
+sinyali buna küçük bir ek süre getirir. Başlamış cümledeki 1.2 saniye duraklama
+sınırı korunur. VAD, uzaktaki başka insan konuşmasını da konuşma sayabilir.
+
+Güncel haber araması genel web aramasından ayrıdır (`services/news.py`). TRT
+manşet RSS ve NTV Atom akışları paralel alınır; konu sorgusunda Google News
+RSS de denenir. Başlık/özet/kaynak/yayın tarihi birlikte bağlama konur. Bugün
+isteğinde İstanbul takvim gününden eski; diğer güncel haber isteklerinde 24
+saatten eski, tarihsiz veya gelecekte görünen içerik elenir. Kaynaklar
+sırayla harmanlanır; genel haber anasayfaları arama özeti olarak sunulmaz.
+Hiç uygun haber yoksa bunu açıkça söyler. LLM 3–5 kısa başlık okuyacak şekilde
+yönlendirilir. Haber içeriği RSS/Atom özetidir, makale tam metni değildir.
+
+TV/ortam sesi kaynaklı yanlış uyanmaları azaltmak için wake eşiği normalde 0.35, müzik çalarken 0.30 ve
+ardışık algılama sayısı her iki durumda 2'dir. İzole tek skor sıçraması
+yeterli değildir. Kayıt hatası/robot konuşması sırasında ardışık sayaç temizlenir.
+Bu ayarlar odada gerçek ses/TV karşılaştırmasıyla yeniden değerlendirilebilir.
+
+Kısa uyandırma telaffuzlarını kaçırmamak için iki komşu karede ana eşik
+şartı yerine biri ana eşiği (normal 0.35, müzik 0.30), ikisi de doğrulama
+eşiğini (normal 0.20, müzik 0.18) geçmelidir. Tek izole sıçrama hâlâ yetmez.
+
+Güçlü tek kare de uyanmaya yeter: normalde 0.60, müzikte 0.50. Daha düşük
+skorlarda komşu kare doğrulaması geçerlidir. Uyandırma kaydına robot
+konuşmadan önce 240 ms kuyruk eklenir; konuşmacı için son 1.6 saniye kullanılır.
+Kayıtlı profiller varken wake eşleşmezse hemen ad sorulmaz: önce komut sesiyle
+tekrar denenir. Komut da doğrulanamazsa isim/profil diyaloguna geçilir.
+SPEAKER SCORE satırları eşleşmenin neden reddedildiğini takip etmek içindir.
+
+Profil diyalogundaki iptal kontrolü Türkçe büyük İ harfini de normalize eder.
+`İptal`, `iptal et`, `vazgeçtim` kayıt işlemini sonlandırır. Logda görülen
+`İpter` STT yanlışı da iptal sayılır. Açık `sohbeti bitir`/`görüşürüz` gibi
+komutlar, konuşmacı doğrulama ve profil sorusundan önce Hey Jarvis moduna döner.
+
+Konuşma kimliği (`session_name`) selamlamada kullanılan wake eşleşmesini
+korur. Kısa/gürültülü/eşleşmeyen komut tek başına bu kimliği silmez. Başka bir
+kayıtlı kişiyle açık eşleşme çelişki sayılır ve isim kullanımı durur; otomatik
+kayıt diyalogu açılmaz. `confirmed_name` iki aşamalı/uzun komut doğrulamasını
+ayrı tutar; profil güncelleme için yeniden doğrulama hâlâ gerekir.
+Otomatik isim sorusu ancak wake eşleşmesi yoksa ve yeterli komut örneğinin
+çıkarımı tamamlanıp kimlik belirlenememişse açılır; kısa ses, bekleyen iş veya
+model hatası yeni kişi sayılmaz. Açık profil oluştur/güncelle talepleri sürer.
